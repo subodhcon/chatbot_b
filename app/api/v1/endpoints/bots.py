@@ -1005,6 +1005,7 @@ async def get_ingestion_job(
 async def start_url_crawl(
     bot_id: uuid.UUID,
     crawl_in: UrlCrawlRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_async_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1068,7 +1069,14 @@ async def start_url_crawl(
 
         # Trigger background Celery task
         from app.tasks.ingestion import crawl_url_task
-        crawl_url_task.delay(str(crawl_job.id))
+        try:
+            crawl_url_task.delay(str(crawl_job.id))
+        except Exception as celery_err:
+            import logging
+            logging.getLogger("app.api.bots").warning(
+                f"Failed to queue crawl task in Celery, falling back to FastAPI BackgroundTasks: {celery_err}"
+            )
+            background_tasks.add_task(crawl_url_task, None, str(crawl_job.id))
 
         response_data = UrlCrawlResponse.model_validate(crawl_job)
         return api_success_response(

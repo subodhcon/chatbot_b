@@ -120,6 +120,9 @@ def get_application() -> FastAPI:
         Inject permissive CORS headers for public widget routes BEFORE the
         global CORSMiddleware runs, so any origin can call them.
         """
+        if request.headers.get("upgrade", "").lower() == "websocket":
+            return await call_next(request)
+
         is_public = request.url.path.startswith(PUBLIC_PREFIX)
         origin = request.headers.get("origin", "")
 
@@ -157,6 +160,8 @@ def get_application() -> FastAPI:
     # Security Headers Middleware
     @application.middleware("http")
     async def add_security_headers(request: Request, call_next):
+        if request.headers.get("upgrade", "").lower() == "websocket":
+            return await call_next(request)
         response = await call_next(request)
         response.headers["X-Frame-Options"] = "SAMEORIGIN"
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -177,6 +182,8 @@ def get_application() -> FastAPI:
     # Request Logging Middleware
     @application.middleware("http")
     async def log_requests(request: Request, call_next):
+        if request.headers.get("upgrade", "").lower() == "websocket":
+            return await call_next(request)
         start_time = time.time()
         client_host = request.client.host if request.client else "unknown"
         

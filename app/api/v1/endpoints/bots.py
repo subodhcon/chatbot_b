@@ -1,6 +1,6 @@
 import uuid
 from typing import Any
-from fastapi import APIRouter, Depends, status, Request, File, UploadFile
+from fastapi import APIRouter, Depends, status, Request, File, UploadFile, BackgroundTasks
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -694,6 +694,7 @@ async def upload_avatar(
 @router.post("/{bot_id}/knowledge/upload", status_code=status.HTTP_201_CREATED)
 async def upload_bot_knowledge(
     bot_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_async_db),
     current_user: User = Depends(get_current_user),
@@ -769,7 +770,14 @@ async def upload_bot_knowledge(
 
         # Trigger background ingestion task
         from app.tasks.ingestion import ingest_knowledge_source
-        ingest_knowledge_source.delay(str(db_job.id))
+        try:
+            ingest_knowledge_source.delay(str(db_job.id))
+        except Exception as celery_err:
+            import logging
+            logging.getLogger("app.api.bots").warning(
+                f"Failed to queue task in Celery, falling back to FastAPI BackgroundTasks: {celery_err}"
+            )
+            background_tasks.add_task(ingest_knowledge_source, None, str(db_job.id))
 
         # Serialize using Pydantic schemas
         response_data = KnowledgeUploadResponse(

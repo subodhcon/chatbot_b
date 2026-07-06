@@ -31,17 +31,22 @@ async def websocket_ingestion_endpoint(
     """
     WebSocket endpoint for real-time knowledge ingestion status/progress updates.
     """
+    # Accept the connection first so the handshake succeeds
+    await websocket.accept()
+
     # 1. Validate UUID format
     try:
         bot_uuid = uuid.UUID(bot_id)
     except ValueError:
         logger.error(f"Invalid UUID format for bot_id in ingestion WS: {bot_id}")
+        await websocket.send_json({"error": "invalid_bot_id", "message": "Invalid bot UUID format"})
         await websocket.close(code=4000)
         return
 
     # 2. Authenticate token
     if not token:
         logger.error(f"No token provided for ingestion WS: {bot_id}")
+        await websocket.send_json({"error": "unauthorized", "message": "No token provided"})
         await websocket.close(code=4001)
         return
 
@@ -49,21 +54,25 @@ async def websocket_ingestion_endpoint(
         payload = decode_token(token)
         if payload.get("type") != "access":
             logger.error("Invalid token type for ingestion WS")
+            await websocket.send_json({"error": "unauthorized", "message": "Invalid token type"})
             await websocket.close(code=4002)
             return
         user_id = payload.get("sub")
         if not user_id:
             logger.error("No sub claim in token for ingestion WS")
+            await websocket.send_json({"error": "unauthorized", "message": "Invalid token subject"})
             await websocket.close(code=4003)
             return
     except Exception as e:
         logger.error(f"Token decoding failed for ingestion WS: {e}")
+        await websocket.send_json({"error": "unauthorized", "message": f"Token decoding failed: {str(e)}"})
         await websocket.close(code=4003)
         return
 
     user = await user_repository.get_user_by_id(db, id=user_id)
     if not user or not user.is_active:
         logger.error("User not found or inactive for ingestion WS")
+        await websocket.send_json({"error": "unauthorized", "message": "User not found or inactive"})
         await websocket.close(code=4004)
         return
 
@@ -73,15 +82,20 @@ async def websocket_ingestion_endpoint(
         bot = await bot_service.get_bot(db, bot_uuid)
         if bot.created_by != user.id:
             logger.error(f"User {user.id} does not own bot {bot_id}")
+            await websocket.send_json({"error": "forbidden", "message": "You do not own this bot"})
             await websocket.close(code=4005)
             return
     except Exception as e:
         logger.error(f"Bot not found or error loading bot: {e}")
+        await websocket.send_json({"error": "not_found", "message": f"Bot not found or error: {str(e)}"})
         await websocket.close(code=4006)
         return
 
     client_channel = f"ingestion:{bot_id}"
-    await manager.connect(websocket, client_channel)
+    # Track the already accepted connection in manager
+    if client_channel not in manager.active_connections:
+        manager.active_connections[client_channel] = set()
+    manager.active_connections[client_channel].add(websocket)
 
     try:
         while True:

@@ -777,7 +777,7 @@ async def upload_bot_knowledge(
             logging.getLogger("app.api.bots").warning(
                 f"Failed to queue task in Celery, falling back to FastAPI BackgroundTasks: {celery_err}"
             )
-            background_tasks.add_task(ingest_knowledge_source, None, str(db_job.id))
+            background_tasks.add_task(ingest_knowledge_source.run, str(db_job.id))
 
         # Serialize using Pydantic schemas
         response_data = KnowledgeUploadResponse(
@@ -1076,7 +1076,7 @@ async def start_url_crawl(
             logging.getLogger("app.api.bots").warning(
                 f"Failed to queue crawl task in Celery, falling back to FastAPI BackgroundTasks: {celery_err}"
             )
-            background_tasks.add_task(crawl_url_task, None, str(crawl_job.id))
+            background_tasks.add_task(crawl_url_task.run, str(crawl_job.id))
 
         response_data = UrlCrawlResponse.model_validate(crawl_job)
         return api_success_response(

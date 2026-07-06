@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.core.celery_app import celery_app
 from app.tasks.base import BaseTask
 from app.db.session import SessionLocal
+import app.db.base # noqa
 from app.models.knowledge_source import KnowledgeSource, KnowledgeSourceStatus, KnowledgeSourceType
 from app.models.ingestion_job import IngestionJob, IngestionJobStatus
 from app.models.source_chunk import SourceChunk

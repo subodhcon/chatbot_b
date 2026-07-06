@@ -89,7 +89,7 @@ class OpenAIChatService(BaseChatService):
             
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={self.api_key}",
+                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.api_key}",
                     headers={"Content-Type": "application/json"},
                     json={
                         "contents": gemini_contents,
@@ -109,7 +109,7 @@ class OpenAIChatService(BaseChatService):
                     return {
                         "answer": answer.strip(),
                         "metadata": {
-                            "model": "gemini-2.5-flash",
+                            "model": "gemini-1.5-flash",
                             "usage": {
                                 "prompt_tokens": None,
                                 "completion_tokens": None,
@@ -191,7 +191,7 @@ class OpenAIChatService(BaseChatService):
             system_instructions = system_prompt or "You are a helpful assistant."
             
             async with httpx.AsyncClient() as client:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?key={self.api_key}"
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?key={self.api_key}"
                 async with client.stream(
                     "POST",
                     url,
@@ -233,7 +233,7 @@ class OpenAIChatService(BaseChatService):
                                             yield {
                                                 "answer_chunk": text_part,
                                                 "metadata": {
-                                                    "model": "gemini-2.5-flash",
+                                                    "model": "gemini-1.5-flash",
                                                     "finish_reason": "stop"
                                                 }
                                             }

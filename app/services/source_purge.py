@@ -1,0 +1,194 @@
+import os
+import uuid
+import logging
+from typing import Any, Dict, Optional
+
+from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.embedding import Embedding
+from app.models.source_chunk import SourceChunk
+from app.models.knowledge_source import KnowledgeSource
+
+logger = logging.getLogger("app.services.source_purge")
+
+
+class SourcePurgeService:
+    """
+    Handles the complete, explicit teardown of a KnowledgeSource and all its
+    derived data:
+
+    1.  Vectors (Embedding rows) — explicit DELETE returning row count.
+    2.  Chunks  (SourceChunk rows) — explicit DELETE returning row count.
+    3.  KnowledgeSource DB row — ORM delete inside the same transaction.
+    4.  Physical file on disk — deleted after the DB commit.
+    5.  Redis cache invalidation — SCAN-based key sweep for bot-level and
+        source-level namespaces; gracefully no-ops on MockRedisClient.
+
+    All three DB operations share one transaction. File and Redis cleanup
+    happen after commit so a DB failure never leaves orphaned state.
+    """
+
+    async def purge_source(
+        self,
+        db: AsyncSession,
+        redis: Any,
+        *,
+        source_id: uuid.UUID,
+        bot_id: uuid.UUID,
+        file_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Fully purge a KnowledgeSource by ID, including all downstream data.
+
+        Args:
+            db:          Async DB session.
+            redis:       Redis client (real or MockRedisClient).
+            source_id:   UUID of the KnowledgeSource to purge.
+            bot_id:      UUID of the owning Bot (used for cache key namespacing).
+            file_path:   Disk path to the source file (if any); deleted after DB commit.
+
+        Returns:
+            PurgeResult dict:
+            {
+                "source_id":        str,
+                "bot_id":           str,
+                "chunks_deleted":   int,
+                "vectors_deleted":  int,
+                "file_deleted":     bool,
+                "cache_keys_cleared": int,
+            }
+        """
+        logger.info(f"[Purge] Starting purge for source_id={source_id}, bot_id={bot_id}")
+
+        # ── Step 1: Count & delete Embedding rows ────────────────────────────
+        # Subquery: chunk IDs that belong to this source
+        chunk_ids_subq = (
+            select(SourceChunk.id)
+            .where(SourceChunk.source_id == source_id)
+            .scalar_subquery()
+        )
+
+        vectors_count_result = await db.execute(
+            select(func.count()).select_from(Embedding).where(
+                Embedding.chunk_id.in_(
+                    select(SourceChunk.id).where(SourceChunk.source_id == source_id)
+                )
+            )
+        )
+        vectors_deleted = vectors_count_result.scalar() or 0
+
+        await db.execute(
+            delete(Embedding).where(Embedding.chunk_id.in_(chunk_ids_subq))
+        )
+        logger.info(f"[Purge] Deleted {vectors_deleted} embedding vector(s) for source {source_id}")
+
+        # ── Step 2: Count & delete SourceChunk rows ──────────────────────────
+        chunks_count_result = await db.execute(
+            select(func.count()).select_from(SourceChunk).where(
+                SourceChunk.source_id == source_id
+            )
+        )
+        chunks_deleted = chunks_count_result.scalar() or 0
+
+        await db.execute(
+            delete(SourceChunk).where(SourceChunk.source_id == source_id)
+        )
+        logger.info(f"[Purge] Deleted {chunks_deleted} chunk(s) for source {source_id}")
+
+        # ── Step 3: Delete the KnowledgeSource row ───────────────────────────
+        result = await db.execute(
+            select(KnowledgeSource).where(KnowledgeSource.id == source_id)
+        )
+        source = result.scalars().first()
+        if source:
+            await db.delete(source)
+            # Capture file_path from DB record if not passed explicitly
+            if file_path is None:
+                file_path = source.file_path
+
+        # ── Commit the DB transaction ─────────────────────────────────────────
+        await db.commit()
+        logger.info(f"[Purge] DB transaction committed for source {source_id}")
+
+        # ── Step 4: Delete physical file from disk ───────────────────────────
+        file_deleted = False
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                file_deleted = True
+                logger.info(f"[Purge] Deleted file from disk: {file_path}")
+            except Exception as file_err:
+                # Non-fatal — log and continue
+                logger.warning(f"[Purge] Could not delete file {file_path}: {file_err}")
+
+        # ── Step 5: Invalidate Redis cache keys ───────────────────────────────
+        cache_keys_cleared = await self._invalidate_cache(redis, bot_id=bot_id, source_id=source_id)
+
+        result_payload = {
+            "source_id": str(source_id),
+            "bot_id": str(bot_id),
+            "chunks_deleted": chunks_deleted,
+            "vectors_deleted": vectors_deleted,
+            "file_deleted": file_deleted,
+            "cache_keys_cleared": cache_keys_cleared,
+        }
+        logger.info(f"[Purge] Completed: {result_payload}")
+        return result_payload
+
+    async def _invalidate_cache(
+        self,
+        redis: Any,
+        *,
+        bot_id: uuid.UUID,
+        source_id: uuid.UUID,
+    ) -> int:
+        """
+        Scan and delete Redis keys under the standard namespaces:
+          - cache:bot:{bot_id}:*
+          - cache:source:{source_id}:*
+
+        Uses SCAN to avoid blocking the Redis server.
+        Falls back gracefully if the client is a MockRedisClient
+        (which stores keys in a plain dict and supports 'delete' but not 'scan').
+
+        Returns the count of deleted cache keys.
+        """
+        patterns = [
+            f"cache:bot:{bot_id}:*",
+            f"cache:source:{source_id}:*",
+        ]
+        total_cleared = 0
+
+        # MockRedisClient does not implement SCAN — handle gracefully
+        if getattr(redis, "is_mock", False):
+            logger.debug("[Purge] MockRedisClient detected — skipping SCAN-based cache invalidation.")
+            return 0
+
+        for pattern in patterns:
+            try:
+                cursor = 0
+                keys_to_delete = []
+                while True:
+                    cursor, keys = await redis.scan(cursor=cursor, match=pattern, count=100)
+                    keys_to_delete.extend(keys)
+                    if cursor == 0:
+                        break
+
+                if keys_to_delete:
+                    deleted = await redis.delete(*keys_to_delete)
+                    total_cleared += deleted
+                    logger.info(
+                        f"[Purge] Cleared {deleted} Redis key(s) matching '{pattern}'"
+                    )
+                else:
+                    logger.debug(f"[Purge] No Redis keys matched pattern '{pattern}'")
+            except Exception as cache_err:
+                # Non-fatal — cache invalidation failure must never abort a purge
+                logger.warning(f"[Purge] Redis cache invalidation failed for pattern '{pattern}': {cache_err}")
+
+        return total_cleared
+
+
+# Module-level singleton
+source_purge_service = SourcePurgeService()

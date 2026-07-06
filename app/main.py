@@ -163,12 +163,12 @@ def get_application() -> FastAPI:
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         
         # Standard content security policy allowing application self resources,
-        # secure WebSockets, and data/blob image sources
+        # secure WebSockets, data/blob image sources, and jsdelivr CDN for API docs (Swagger)
         csp_directives = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
-            "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data: blob:; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "img-src 'self' data: blob: https://cdn.jsdelivr.net; "
             "connect-src 'self' ws: wss:;"
         )
         response.headers["Content-Security-Policy"] = csp_directives

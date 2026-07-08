@@ -87,7 +87,7 @@ class BotConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     similarity_threshold: Mapped[float] = mapped_column(
         Float,
         nullable=False,
-        default=0.75,
+        default=0.45,
         comment="Minimum cosine similarity score for a chunk to be used",
     )
 

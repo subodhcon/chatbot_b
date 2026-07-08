@@ -56,7 +56,8 @@ class PromptBuilderService:
             "1. You will be provided with context chunks retrieved from the knowledge base.\n"
             "2. Answer the user's question using ONLY the provided context chunks.\n"
             "3. If the context does not contain the answer, or if there is no context provided, state clearly that you cannot answer based on the available information, or follow the fallback instruction (if provided).\n"
-            "4. Maintain a natural conversation. Do NOT explicitly say 'Based on the provided context' or 'According to the retrieved chunks' or similar phrases. Answer as if you naturally know the information."
+            "4. Maintain a natural conversation. Do NOT explicitly say 'Based on the provided context' or 'According to the retrieved chunks' or similar phrases. Answer as if you naturally know the information.\n"
+            "5. Keep responses concise, conversational, and highly readable. Avoid writing long essays or massive paragraphs. Use clean bullet points for lists and bold highlights for readability. Try to keep the final answer under 3-4 sentences unless a detailed explanation is explicitly requested."
         )
 
         # 5. Fallback instruction (when the bot has a configured fallback message)
@@ -102,7 +103,8 @@ class PromptBuilderService:
             f"{context_str}\n\n"
             f"[USER QUESTION]\n"
             f"{user_question.strip()}\n\n"
-            f"Please respond to the user question using the knowledge context above following the system rules."
+            f"Please respond to the user question using the knowledge context above following the system rules.\n"
+            f"CRITICAL: Keep your response short and very concise (maximum 2-3 sentences). Answer directly. Do NOT include large tech-stack bullet lists or detailed contact lists unless explicitly requested by the user."
         )
         return user_prompt
 

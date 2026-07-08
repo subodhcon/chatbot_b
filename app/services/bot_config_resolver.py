@@ -43,7 +43,7 @@ class BotConfigResolver:
     DEFAULT_TEMPERATURE: float = 0.7
     DEFAULT_MAX_TOKENS: int = 1024
     DEFAULT_TOP_K: int = 5
-    DEFAULT_SIMILARITY_THRESHOLD: float = 0.65
+    DEFAULT_SIMILARITY_THRESHOLD: float = 0.45
     DEFAULT_CONFIDENCE_THRESHOLD: float = 0.40
 
     def resolve(self, config) -> BotConfigParams:

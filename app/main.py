@@ -3,7 +3,6 @@ import logging
 from typing import Any
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import text
@@ -114,11 +113,38 @@ def get_application() -> FastAPI:
     # to the configured BACKEND_CORS_ORIGINS list.
     PUBLIC_PREFIX = f"{settings.API_V1_STR}/public"
 
-    @application.middleware("http")
-    async def public_cors_middleware(request: Request, call_next):
+    import re as _re
+
+    def _is_allowed_origin(origin: str) -> bool:
         """
-        Inject permissive CORS headers for public widget routes BEFORE the
-        global CORSMiddleware runs, so any origin can call them.
+        Returns True if the given origin is allowed.
+        Allows:
+          - Any origin in BACKEND_CORS_ORIGINS
+          - Any *.vercel.app subdomain (covers all Vercel preview/production deployments)
+          - localhost on any port
+        """
+        if not origin:
+            return False
+        # Strip trailing slash for comparison
+        origin = origin.rstrip("/")
+        # Explicit list match
+        explicit = [str(o).rstrip("/") for o in settings.BACKEND_CORS_ORIGINS]
+        if origin in explicit:
+            return True
+        # Allow all vercel.app subdomains (covers chatbot-f-plum, chatbot-f-1wda, etc.)
+        if _re.match(r"^https?://[a-zA-Z0-9\-]+\.vercel\.app$", origin):
+            return True
+        # Allow localhost any port
+        if _re.match(r"^http://localhost(:\d+)?$", origin):
+            return True
+        return False
+
+    @application.middleware("http")
+    async def smart_cors_middleware(request: Request, call_next):
+        """
+        Smart two-tier CORS:
+        - Public widget routes: allow ALL origins (*)
+        - All other routes: allow vercel.app subdomains + explicit BACKEND_CORS_ORIGINS
         """
         if request.headers.get("upgrade", "").lower() == "websocket":
             return await call_next(request)
@@ -126,36 +152,50 @@ def get_application() -> FastAPI:
         is_public = request.url.path.startswith(PUBLIC_PREFIX)
         origin = request.headers.get("origin", "")
 
-        if is_public and request.method == "OPTIONS":
-            from fastapi.responses import Response as FastAPIResponse
-            return FastAPIResponse(
-                status_code=204,
-                headers={
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-                    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-                    "Access-Control-Max-Age": "86400",
-                },
-            )
+        # --- Public routes: allow any origin ---
+        if is_public:
+            if request.method == "OPTIONS":
+                from fastapi.responses import Response as FastAPIResponse
+                return FastAPIResponse(
+                    status_code=204,
+                    headers={
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                        "Access-Control-Max-Age": "86400",
+                    },
+                )
+            response = await call_next(request)
+            if origin:
+                response.headers["Access-Control-Allow-Origin"] = "*"
+                response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+                response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+            return response
 
-        response = await call_next(request)
+        # --- Private routes: dynamic origin check ---
+        if origin and _is_allowed_origin(origin):
+            if request.method == "OPTIONS":
+                from fastapi.responses import Response as FastAPIResponse
+                return FastAPIResponse(
+                    status_code=204,
+                    headers={
+                        "Access-Control-Allow-Origin": origin,
+                        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+                        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
+                        "Access-Control-Allow-Credentials": "true",
+                        "Access-Control-Max-Age": "86400",
+                    },
+                )
+            response = await call_next(request)
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, PATCH, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With"
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Vary"] = "Origin"
+            return response
 
-        if is_public and origin:
-            response.headers["Access-Control-Allow-Origin"] = "*"
-            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-
-        return response
-
-    # Restricted CORS for all other routes (dashboard, auth, admin)
-    if settings.BACKEND_CORS_ORIGINS:
-        application.add_middleware(
-            CORSMiddleware,
-            allow_origins=[str(origin).strip("/") for origin in settings.BACKEND_CORS_ORIGINS],
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
+        # No origin header (same-origin or non-browser) — pass through
+        return await call_next(request)
 
     # Security Headers Middleware
     @application.middleware("http")

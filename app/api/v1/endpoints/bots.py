@@ -8,7 +8,7 @@ import os
 from app.core.config import settings
 
 from app.db.session import get_async_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, has_bot_access
 from app.utils.redis import get_redis
 from app.models.user import User
 from app.schemas.bot import (
@@ -169,8 +169,8 @@ async def get_bot(
     try:
         bot = await bot_service.get_bot(db, bot_id)
 
-        # Ownership check — users can only view their own bots
-        if bot.created_by != current_user.id:
+        # Authorization check — verify user has creator, manager, or superadmin access
+        if not await has_bot_access(db, current_user, bot_id):
             return api_error_response(
                 message="Bot not found.",
                 code="BOT_NOT_FOUND",
@@ -215,7 +215,7 @@ async def update_bot(
     try:
         bot = await bot_service.get_bot(db, bot_id)
 
-        if bot.created_by != current_user.id:
+        if not await has_bot_access(db, current_user, bot_id):
             return api_error_response(
                 message="Bot not found.",
                 code="BOT_NOT_FOUND",
@@ -360,7 +360,7 @@ async def get_bot_config(
 
         bot = await bot_service.get_bot(db, bot_id)
 
-        if bot.created_by != current_user.id:
+        if not await has_bot_access(db, current_user, bot_id):
             return api_error_response(
                 message="Bot not found.",
                 code="BOT_NOT_FOUND",
@@ -414,7 +414,7 @@ async def update_bot_config(
     try:
         bot = await bot_service.get_bot(db, bot_id)
 
-        if bot.created_by != current_user.id:
+        if not await has_bot_access(db, current_user, bot_id):
             return api_error_response(
                 message="Bot not found.",
                 code="BOT_NOT_FOUND",
@@ -495,9 +495,7 @@ async def list_bot_versions(
     Returns 404 if the bot does not exist or does not belong to the user.
     """
     try:
-        bot = await bot_service.get_bot(db, bot_id)
-
-        if bot.created_by != current_user.id:
+        if not await has_bot_access(db, current_user, bot_id):
             return api_error_response(
                 message="Bot not found.",
                 code="BOT_NOT_FOUND",
@@ -566,9 +564,7 @@ async def restore_bot_version(
     Returns 403 if the version belongs to a different bot.
     """
     try:
-        bot = await bot_service.get_bot(db, bot_id)
-
-        if bot.created_by != current_user.id:
+        if not await has_bot_access(db, current_user, bot_id):
             return api_error_response(
                 message="Bot not found.",
                 code="BOT_NOT_FOUND",
@@ -706,8 +702,7 @@ async def upload_bot_knowledge(
     """
     try:
         # Check if the bot exists and belongs to current user
-        bot = await bot_service.get_bot(db, bot_id)
-        if bot.created_by != current_user.id:
+        if not await has_bot_access(db, current_user, bot_id):
             return api_error_response(
                 message="Bot not found.",
                 code="BOT_NOT_FOUND",
@@ -826,8 +821,7 @@ async def list_bot_knowledge(
     """
     try:
         # Check if the bot exists and belongs to current user
-        bot = await bot_service.get_bot(db, bot_id)
-        if bot.created_by != current_user.id:
+        if not await has_bot_access(db, current_user, bot_id):
             return api_error_response(
                 message="Bot not found.",
                 code="BOT_NOT_FOUND",
@@ -900,8 +894,7 @@ async def get_ingestion_status(
     """
     try:
         # Ownership check
-        bot = await bot_service.get_bot(db, bot_id)
-        if bot.created_by != current_user.id:
+        if not await has_bot_access(db, current_user, bot_id):
             return api_error_response(
                 message="Bot not found.",
                 code="BOT_NOT_FOUND",
@@ -958,8 +951,7 @@ async def get_ingestion_job(
     """
     try:
         # Ownership check
-        bot = await bot_service.get_bot(db, bot_id)
-        if bot.created_by != current_user.id:
+        if not await has_bot_access(db, current_user, bot_id):
             return api_error_response(
                 message="Bot not found.",
                 code="BOT_NOT_FOUND",
@@ -1019,8 +1011,7 @@ async def start_url_crawl(
     """
     try:
         # Check if the bot exists and belongs to current user
-        bot = await bot_service.get_bot(db, bot_id)
-        if bot.created_by != current_user.id:
+        if not await has_bot_access(db, current_user, bot_id):
             return api_error_response(
                 message="Bot not found.",
                 code="BOT_NOT_FOUND",
@@ -1128,8 +1119,7 @@ async def delete_bot_knowledge(
     """
     try:
         # Check if bot exists and belongs to user
-        bot = await bot_service.get_bot(db, bot_id)
-        if bot.created_by != current_user.id:
+        if not await has_bot_access(db, current_user, bot_id):
             return api_error_response(
                 message="Bot not found.",
                 code="BOT_NOT_FOUND",
@@ -1211,8 +1201,7 @@ async def bulk_delete_bot_knowledge(
     """
     try:
         # Check if bot exists and belongs to user
-        bot = await bot_service.get_bot(db, bot_id)
-        if bot.created_by != current_user.id:
+        if not await has_bot_access(db, current_user, bot_id):
             return api_error_response(
                 message="Bot not found.",
                 code="BOT_NOT_FOUND",

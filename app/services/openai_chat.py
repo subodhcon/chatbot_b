@@ -16,7 +16,10 @@ class OpenAIChatService(BaseChatService):
 
     def __init__(self, api_key: str = settings.OPENAI_API_KEY, default_model: str = "gpt-4o-mini") -> None:
         self.api_key = api_key
-        self.default_model = default_model
+        if api_key and api_key.startswith("gsk_") and default_model.startswith("gpt-"):
+            self.default_model = "llama-3.1-8b-instant"
+        else:
+            self.default_model = default_model
         self._client = None
 
     @property
@@ -24,7 +27,10 @@ class OpenAIChatService(BaseChatService):
         if not self._client:
             if not self.api_key:
                 raise ValueError("OpenAI API Key is missing. Please configure it in your settings/.env file.")
-            self._client = AsyncOpenAI(api_key=self.api_key)
+            if self.api_key.startswith("gsk_"):
+                self._client = AsyncOpenAI(api_key=self.api_key, base_url="https://api.groq.com/openai/v1")
+            else:
+                self._client = AsyncOpenAI(api_key=self.api_key)
         return self._client
 
     async def _execute_with_retry(self, func, max_retries: int = 3, backoff_factor: float = 2.0, *args, **kwargs):
@@ -122,6 +128,8 @@ class OpenAIChatService(BaseChatService):
                     raise ValueError(f"Gemini API error: {resp.status_code} - {resp.text}")
 
         model = model_name or self.default_model
+        if self.api_key.startswith("gsk_") and model.startswith("gpt-"):
+            model = "llama-3.1-8b-instant"
         messages = [{"role": "system", "content": system_prompt}]
 
         if chat_history:
@@ -243,6 +251,8 @@ class OpenAIChatService(BaseChatService):
             return
 
         model = model_name or self.default_model
+        if self.api_key.startswith("gsk_") and model.startswith("gpt-"):
+            model = "llama-3.1-8b-instant"
         messages = [{"role": "system", "content": system_prompt}]
 
         if chat_history:

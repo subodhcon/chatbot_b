@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     # OpenAI API configuration placeholders
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o"
+    GEMINI_API_KEY: str = ""
 
     # Upload Directory Configuration
     UPLOAD_DIR: str = "uploads"

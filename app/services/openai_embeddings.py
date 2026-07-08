@@ -7,6 +7,12 @@ from app.core.config import settings
 logger = logging.getLogger("app.services.openai_embeddings")
 
 
+import os
+
+# Fallback Gemini key to use for embeddings when client is using Groq
+GEMINI_FALLBACK_KEY = settings.GEMINI_API_KEY
+
+
 class OpenAIEmbeddingService:
     """
     Service for generating vector embeddings using the OpenAI API.
@@ -23,6 +29,9 @@ class OpenAIEmbeddingService:
         if not self._client:
             if not self.api_key:
                 raise ValueError("OpenAI API Key is missing. Please configure it in your settings/.env file.")
+            if self.api_key.startswith("gsk_"):
+                # Groq has no embeddings, we don't instantiate OpenAI client with Groq key
+                raise ValueError("Groq does not support embeddings. Embedding generation falls back to Gemini API.")
             self._client = OpenAI(api_key=self.api_key)
         return self._client
 
@@ -47,8 +56,13 @@ class OpenAIEmbeddingService:
         if not cleaned_texts:
             return []
 
+        api_key_to_use = self.api_key
+        # Detect if Groq key is used and fallback to Gemini
+        if api_key_to_use.startswith("gsk_"):
+            api_key_to_use = GEMINI_FALLBACK_KEY
+
         # Check if the key is a Google Gemini API Key
-        if self.api_key.startswith("AIzaSy") or self.api_key.startswith("AQ."):
+        if api_key_to_use.startswith("AIzaSy") or api_key_to_use.startswith("AQ."):
             import httpx
             requests_payload = []
             for t in cleaned_texts:
@@ -64,7 +78,7 @@ class OpenAIEmbeddingService:
             for attempt in range(max_retries + 1):
                 try:
                     logger.info(f"Sending batch of {len(cleaned_texts)} texts to Gemini Embedding API (Attempt {attempt + 1}/{max_retries + 1})")
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents?key={self.api_key}"
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents?key={api_key_to_use}"
                     with httpx.Client() as client:
                         resp = client.post(
                             url,

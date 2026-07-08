@@ -303,7 +303,10 @@ def crawl_url_task(self, crawl_id: str) -> str:
             db.commit()
 
             # Trigger background ingestion task
-            ingest_knowledge_source.delay(str(job.id))
+            if settings.ENVIRONMENT == "development":
+                ingest_knowledge_source.run(str(job.id))
+            else:
+                ingest_knowledge_source.delay(str(job.id))
 
         # 5. Complete Crawl
         crawl.status = UrlCrawlStatus.completed

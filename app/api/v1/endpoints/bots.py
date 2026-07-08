@@ -770,14 +770,17 @@ async def upload_bot_knowledge(
 
         # Trigger background ingestion task
         from app.tasks.ingestion import ingest_knowledge_source
-        try:
-            ingest_knowledge_source.delay(str(db_job.id))
-        except Exception as celery_err:
-            import logging
-            logging.getLogger("app.api.bots").warning(
-                f"Failed to queue task in Celery, falling back to FastAPI BackgroundTasks: {celery_err}"
-            )
+        if settings.ENVIRONMENT == "development":
             background_tasks.add_task(ingest_knowledge_source.run, str(db_job.id))
+        else:
+            try:
+                ingest_knowledge_source.delay(str(db_job.id))
+            except Exception as celery_err:
+                import logging
+                logging.getLogger("app.api.bots").warning(
+                    f"Failed to queue task in Celery, falling back to FastAPI BackgroundTasks: {celery_err}"
+                )
+                background_tasks.add_task(ingest_knowledge_source.run, str(db_job.id))
 
         # Serialize using Pydantic schemas
         response_data = KnowledgeUploadResponse(
@@ -1069,14 +1072,17 @@ async def start_url_crawl(
 
         # Trigger background Celery task
         from app.tasks.ingestion import crawl_url_task
-        try:
-            crawl_url_task.delay(str(crawl_job.id))
-        except Exception as celery_err:
-            import logging
-            logging.getLogger("app.api.bots").warning(
-                f"Failed to queue crawl task in Celery, falling back to FastAPI BackgroundTasks: {celery_err}"
-            )
+        if settings.ENVIRONMENT == "development":
             background_tasks.add_task(crawl_url_task.run, str(crawl_job.id))
+        else:
+            try:
+                crawl_url_task.delay(str(crawl_job.id))
+            except Exception as celery_err:
+                import logging
+                logging.getLogger("app.api.bots").warning(
+                    f"Failed to queue crawl task in Celery, falling back to FastAPI BackgroundTasks: {celery_err}"
+                )
+                background_tasks.add_task(crawl_url_task.run, str(crawl_job.id))
 
         response_data = UrlCrawlResponse.model_validate(crawl_job)
         return api_success_response(

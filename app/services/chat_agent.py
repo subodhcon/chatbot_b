@@ -61,6 +61,35 @@ class ChatAgentService:
                         else:
                             logger.error(f"Gemini API error: {response.status_code} - {response.text}")
                 
+                elif api_key.startswith("gsk_"):
+                    # Groq API call
+                    messages = [{"role": "system", "content": system_instructions}]
+                    for h in history:
+                        messages.append({"role": h["role"], "content": h["content"]})
+                    
+                    async with httpx.AsyncClient() as client:
+                        response = await client.post(
+                            "https://api.groq.com/openai/v1/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {api_key}",
+                                "Content-Type": "application/json",
+                            },
+                            json={
+                                "model": "llama-3.1-8b-instant",
+                                "messages": messages,
+                                "temperature": 0.7,
+                                "max_tokens": 512,
+                            },
+                            timeout=15.0
+                        )
+                        
+                        if response.status_code == 200:
+                            res_json = response.json()
+                            reply = res_json["choices"][0]["message"]["content"]
+                            if reply:
+                                return reply.strip()
+                        else:
+                            logger.error(f"Groq API error: {response.status_code} - {response.text}")
                 else:
                     # Default to OpenAI call
                     messages = [{"role": "system", "content": system_instructions}]

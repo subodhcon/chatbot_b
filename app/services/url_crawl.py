@@ -59,18 +59,26 @@ class UrlCrawlService:
 
         # Decompose non-content semantic tag blocks
         tags_to_remove = ["script", "style", "nav", "footer", "header", "aside", "noscript", "iframe"]
-        for tag in soup.find_all(tags_to_remove):
-            tag.decompose()
+        for tag in list(soup.find_all(tags_to_remove)):
+            if tag is not None:
+                tag.decompose()
 
         # Decompose elements with navigation/footer indicators in ID or class
-        for tag in soup.find_all(True):
+        for tag in list(soup.find_all(True)):
+            if tag is None or tag.parent is None:
+                continue
             # Check classes
             classes = tag.get("class", [])
+            if classes is None:
+                classes = []
             if isinstance(classes, str):
                 classes = [classes]
             classes_str = " ".join(classes).lower()
 
-            tag_id = str(tag.get("id", "")).lower()
+            tag_id = tag.get("id", "")
+            if tag_id is None:
+                tag_id = ""
+            tag_id = str(tag_id).lower()
 
             # Common navigation/footer/header markers
             nav_indicators = ["nav", "footer", "header", "sidebar", "menu", "aside", "widget"]
@@ -91,8 +99,12 @@ class UrlCrawlService:
         current_domain = parsed_current.netloc
 
         links = []
-        for anchor in soup.find_all("a", href=True):
-            href = anchor["href"]
+        for anchor in list(soup.find_all("a", href=True)):
+            if anchor is None or anchor.parent is None:
+                continue
+            href = anchor.get("href")
+            if not href:
+                continue
             abs_url = urljoin(current_url, href)
             parsed_abs = urlparse(abs_url)
 

@@ -12,7 +12,7 @@ class UrlCrawlService:
     Service to crawl web pages, respect robots.txt rules, and extract page contents.
     """
 
-    def __init__(self, user_agent: str = "ChatbotCrawler"):
+    def __init__(self, user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"):
         self.user_agent = user_agent
         self._robots_parsers = {}
 
@@ -25,7 +25,12 @@ class UrlCrawlService:
                 resp = httpx.get(
                     robots_url,
                     timeout=5.0,
-                    headers={"User-Agent": self.user_agent},
+                    headers={
+                        "User-Agent": self.user_agent,
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Connection": "keep-alive"
+                    },
                     follow_redirects=True,
                 )
                 if resp.status_code == 200:
@@ -140,7 +145,12 @@ class UrlCrawlService:
                 resp = httpx.get(
                     url,
                     timeout=10.0,
-                    headers={"User-Agent": self.user_agent},
+                    headers={
+                        "User-Agent": self.user_agent,
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Connection": "keep-alive"
+                    },
                     follow_redirects=True,
                 )
                 if resp.status_code != 200:

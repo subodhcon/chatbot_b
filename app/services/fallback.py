@@ -53,8 +53,18 @@ class FallbackResponseService:
         # 4. Fallback Response Selection
         # If low confidence or explicitly asked for human, we return fallback message if configured
         selected_answer = generated_answer
-        if escalation_eligible and fallback_message:
-            selected_answer = fallback_message
+        if escalation_eligible:
+            # Check if user asked for contact/agent/support info specifically
+            contact_keywords = {"contact", "agent", "connect", "support", "speak", "reach", "phone", "email", "address", "call"}
+            if any(kw in user_q_lower for kw in contact_keywords):
+                selected_answer = (
+                    "You can reach out to the Confluxaa team via:\n"
+                    "• 📧 **Email:** contact@confluxaa.com\n"
+                    "• 🌐 **Website:** www.confluxaa.com (by filling out the contact form)\n"
+                    "• 📍 **Office Address:** Bangalore, Karnataka, India"
+                )
+            elif fallback_message:
+                selected_answer = fallback_message
 
         logger.info(
             f"Fallback processed - Low Confidence: {is_low_confidence} (Score: {combined_confidence:.4f} vs Thresh: {confidence_threshold:.4f}), "

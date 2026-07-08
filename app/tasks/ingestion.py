@@ -11,6 +11,7 @@ from app.db.session import SessionLocal
 import app.db.base # noqa
 from app.models.knowledge_source import KnowledgeSource, KnowledgeSourceStatus, KnowledgeSourceType
 from app.models.ingestion_job import IngestionJob, IngestionJobStatus
+from app.models.url_crawl import UrlCrawl, UrlCrawlStatus
 from app.models.source_chunk import SourceChunk
 from app.models.embedding import Embedding
 from app.services.pdf_extraction import pdf_extraction_service
@@ -199,7 +200,6 @@ def ingest_knowledge_source(self, job_id: str) -> str:
         except Exception as rollback_err:
             logger.error(f"Failed to update failed status for job {job_id}: {rollback_err}")
             
-        raise e
 
     finally:
         db.close()
@@ -240,7 +240,14 @@ def crawl_url_task(self, crawl_id: str) -> str:
             resp = httpx.get(
                 crawl.start_url,
                 timeout=10.0,
-                headers={"User-Agent": url_crawl_service.user_agent},
+                headers={
+                    "User-Agent": url_crawl_service.user_agent,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "Connection": "keep-alive",
+                    "Upgrade-Insecure-Requests": "1"
+                },
                 follow_redirects=True,
             )
             if resp.status_code != 200:
@@ -307,44 +314,40 @@ def crawl_url_task(self, crawl_id: str) -> str:
         logger.exception(f"Error executing crawl job {crawl_id}: {e}")
         try:
             db.rollback()
-            from app.models.url_crawl import UrlCrawl, UrlCrawlStatus
             crawl = db.query(UrlCrawl).filter(UrlCrawl.id == crawl_id).first()
             if crawl:
                 crawl.status = UrlCrawlStatus.failed
                 db.add(crawl)
 
-                # Create a failed KnowledgeSource representing the seed URL
-                import uuid
-                from app.models.knowledge_source import KnowledgeSource, KnowledgeSourceStatus, KnowledgeSourceType
-                from app.models.ingestion_job import IngestionJob, IngestionJobStatus
-                
-                source = KnowledgeSource(
-                    id=uuid.uuid4(),
-                    bot_id=crawl.bot_id,
-                    source_type=KnowledgeSourceType.url,
-                    source_name=crawl.start_url,
-                    url=crawl.start_url,
-                    file_path=None,
-                    file_size=0,
-                    status=KnowledgeSourceStatus.failed,
-                )
-                db.add(source)
-                db.flush()
+            # Create a failed KnowledgeSource representing the seed URL
+            source = KnowledgeSource(
+                id=uuid.uuid4(),
+                bot_id=crawl.bot_id if crawl else None,
+                source_type=KnowledgeSourceType.url,
+                source_name=crawl.start_url if crawl else "Web Crawl",
+                url=crawl.start_url if crawl else "",
+                file_path=None,
+                file_size=0,
+                status=KnowledgeSourceStatus.failed,
+            )
+            db.add(source)
+            db.flush()
 
-                job = IngestionJob(
-                    id=uuid.uuid4(),
-                    source_id=source.id,
-                    status=IngestionJobStatus.failed,
-                    progress=100,
-                    error_message=str(e),
-                    completed_at=datetime.utcnow(),
-                )
-                db.add(job)
-                db.flush()
-                
-                db.commit()
-                
-                # Broadcast status update
+            job = IngestionJob(
+                id=uuid.uuid4(),
+                source_id=source.id,
+                status=IngestionJobStatus.failed,
+                progress=100,
+                error_message=str(e),
+                completed_at=datetime.utcnow(),
+            )
+            db.add(job)
+            db.flush()
+            
+            db.commit()
+            
+            # Broadcast status update
+            if crawl:
                 publish_ingestion_update(
                     job_id=str(job.id),
                     bot_id=str(crawl.bot_id),
@@ -355,7 +358,6 @@ def crawl_url_task(self, crawl_id: str) -> str:
                 )
         except Exception as rollback_err:
             logger.error(f"Failed to update failed status for crawl {crawl_id}: {rollback_err}")
-        raise e
     finally:
         db.close()
 

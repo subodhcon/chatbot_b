@@ -4,12 +4,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jose import JWTError, ExpiredSignatureError
 
 from app.db.session import get_async_db
-from app.schemas.user import UserCreate, UserResponse, UserLogin, TokenResponse, TokenRefreshRequest, TokenRefreshResponse
+from app.schemas.user import UserCreate, UserResponse, UserLogin, TokenResponse, TokenRefreshRequest, TokenRefreshResponse, UserProfileUpdate, UserPasswordUpdate
 from app.services.auth import auth_service
 from app.core.responses import api_success_response, api_error_response
 from app.dependencies import get_current_user
 from app.models.user import User
-from app.core.security import decode_token
+from app.core.security import decode_token, verify_password, hash_password
 from app.repositories.user import user_repository
 
 router = APIRouter()
@@ -78,6 +78,81 @@ async def get_current_user_profile(
     """
     user_data = jsonable_encoder(UserResponse.model_validate(current_user))
     return api_success_response(data=user_data, status_code=status.HTTP_200_OK)
+
+@router.put("/profile", response_model=UserResponse, status_code=status.HTTP_200_OK)
+async def update_profile(
+    profile_in: UserProfileUpdate,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update currently authenticated user's profile details.
+    """
+    try:
+        # Check if email is being changed
+        if profile_in.email != current_user.email:
+            # Prevent superadmins from changing their email address
+            if current_user.role == "superadmin":
+                return api_error_response(
+                    message="Superadmin email address cannot be changed.",
+                    code="SUPERADMIN_EMAIL_CHANGE_PREVENTED",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+            
+            existing = await user_repository.get_user_by_email(db, email=profile_in.email)
+            if existing:
+                return api_error_response(
+                    message="Email already in use.",
+                    code="EMAIL_ALREADY_IN_USE",
+                    status_code=status.HTTP_400_BAD_REQUEST
+                )
+        
+        current_user.name = profile_in.name
+        current_user.email = profile_in.email
+        await db.commit()
+        await db.refresh(current_user)
+        
+        user_data = jsonable_encoder(UserResponse.model_validate(current_user))
+        return api_success_response(data=user_data, status_code=status.HTTP_200_OK)
+    except Exception as e:
+        return api_error_response(
+            message="Failed to update profile.",
+            code="PROFILE_UPDATE_FAILED",
+            details=str(e),
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+@router.put("/password", status_code=status.HTTP_200_OK)
+async def update_password(
+    password_in: UserPasswordUpdate,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update currently authenticated user's password.
+    """
+    try:
+        # Verify current password
+        if not verify_password(password_in.current_password, current_user.password_hash):
+            return api_error_response(
+                message="Incorrect current password.",
+                code="INCORRECT_CURRENT_PASSWORD",
+                status_code=status.HTTP_400_BAD_REQUEST
+            )
+            
+        current_user.password_hash = hash_password(password_in.new_password)
+        await db.commit()
+        
+        return api_success_response(
+            data={"message": "Password updated successfully."}
+        )
+    except Exception as e:
+        return api_error_response(
+            message="Failed to update password.",
+            code="PASSWORD_UPDATE_FAILED",
+            details=str(e),
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 @router.post("/refresh", response_model=TokenRefreshResponse, status_code=status.HTTP_200_OK)
 async def refresh_token(

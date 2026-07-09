@@ -71,3 +71,11 @@ class TokenRefreshResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
+
+class UserProfileUpdate(BaseModel):
+    name: str = Field(..., max_length=100, description="Updated display name")
+    email: EmailStr = Field(..., description="Updated email address")
+
+class UserPasswordUpdate(BaseModel):
+    current_password: str = Field(..., min_length=6, description="Current password")
+    new_password: str = Field(..., min_length=6, description="New password")

@@ -2,7 +2,7 @@ import uuid
 from typing import Any, List
 from fastapi import APIRouter, Depends, status, HTTPException
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_async_db
 from app.dependencies import get_current_user
@@ -123,7 +123,7 @@ async def create_user(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
-# 3. DELETE /api/v1/users/{user_id} — soft delete/deactivate a user
+# 3. DELETE /api/v1/users/{user_id} — hard delete a user with safety checks
 @router.delete("/{user_id}", status_code=status.HTTP_200_OK)
 async def delete_user(
     user_id: uuid.UUID,
@@ -139,12 +139,41 @@ async def delete_user(
                 status_code=status.HTTP_404_NOT_FOUND
             )
             
-        # Deactivate
-        user.is_active = False
-        await db.commit()
+        # Safety Check 1: User account is active
+        if user.is_active:
+            return api_error_response(
+                message="Cannot delete an active user. Please deactivate the account first.",
+                code="ACTIVE_USER_DELETION_PREVENTED",
+                status_code=status.HTTP_400_BAD_REQUEST
+            )
+            
+        # Safety Check 2: User owns chatbots
+        bot_count_stmt = select(func.count()).select_from(Bot).where(Bot.created_by == user_id)
+        bot_count_res = await db.execute(bot_count_stmt)
+        bot_count = bot_count_res.scalar() or 0
+        if bot_count > 0:
+            return api_error_response(
+                message="Cannot delete user who owns chatbots. Remove or reassign chatbots first.",
+                code="OWNED_BOTS_EXIST",
+                status_code=status.HTTP_400_BAD_REQUEST
+            )
+            
+        # Safety Check 3: User is assigned as manager to chatbots
+        manager_count_stmt = select(func.count()).select_from(BotManager).where(BotManager.user_id == user_id)
+        manager_count_res = await db.execute(manager_count_stmt)
+        manager_count = manager_count_res.scalar() or 0
+        if manager_count > 0:
+            return api_error_response(
+                message="Cannot delete user who is assigned to chatbots. Unassign from all chatbots first.",
+                code="ASSIGNED_BOTS_EXIST",
+                status_code=status.HTTP_400_BAD_REQUEST
+            )
+            
+        # Hard delete
+        await user_repository.delete_user(db, id=user_id)
         
         return api_success_response(
-            data={"id": str(user_id), "deactivated": True, "is_active": False}
+            data={"id": str(user_id), "deleted": True}
         )
     except Exception as e:
         return api_error_response(

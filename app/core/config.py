@@ -45,7 +45,19 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
 
     # MongoDB Settings
-    MONGODB_URL: str = "mongodb://localhost:27017"
+    MONGODB_URL: str = ""
+
+    @field_validator("MONGODB_URL", mode="before")
+    @classmethod
+    def assemble_mongodb_url(cls, v: str) -> str:
+        if v:
+            return v
+        import os
+        for env_name in ["MONGODB_URI", "MONGO_URL", "MONGODB_URL"]:
+            val = os.environ.get(env_name)
+            if val:
+                return val
+        return "mongodb://localhost:27017"
 
     # Security & JWT Token Secrets
     JWT_SECRET_KEY: str = "supersecretchangeinproduction"

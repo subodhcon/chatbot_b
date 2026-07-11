@@ -145,10 +145,25 @@ async def initialize_public_conversation(
         bot, config = row
         user_identifier = f"Guest #{random.randint(1000, 9999)}"
 
-        # Create conversation in MongoDB
+        # Create conversation in MongoDB dynamically using bot config
         from app.core.config import settings
         from app.core.mongo import mongo_registry
-        mongo_client = mongo_registry.get_client("public_endpoint", settings.MONGODB_URL)
+        
+        mongo_uri = None
+        db_name = "chatbot"
+        if config and config.use_custom_mongo:
+            mongo_uri = config.mongo_uri
+            db_name = config.mongo_db_name or "chatbot"
+        else:
+            mongo_uri = settings.MONGODB_URL
+            
+        if not mongo_uri:
+            raise ValueError("No MongoDB URL is configured for this bot.")
+            
+        mongo_client = mongo_registry.get_client(str(bot_id), mongo_uri)
+        if not mongo_client:
+            raise RuntimeError("Failed to establish MongoDB client connection.")
+            
         conv_id = str(uuid.uuid4())
         conv_doc = {
             "_id": conv_id,
@@ -158,7 +173,7 @@ async def initialize_public_conversation(
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow(),
         }
-        await mongo_client["chatbot"]["conversations"].insert_one(conv_doc)
+        await mongo_client[db_name]["conversations"].insert_one(conv_doc)
         conv = Conversation(conv_doc)
 
         # Track conversation started event

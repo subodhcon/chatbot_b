@@ -44,29 +44,6 @@ class WidgetErrorPayload(BaseModel):
     userAgent: Optional[str] = None
     bot_id: Optional[uuid.UUID] = None
 
-@router.get("/debug-mongo", include_in_schema=True)
-async def debug_mongo():
-    import os
-    from urllib.parse import urlparse
-    from app.core.config import settings
-    
-    env_keys = [k for k in os.environ.keys() if "MONGO" in k.upper()]
-    
-    raw_url = settings.MONGODB_URL
-    parsed_url = "None"
-    if raw_url:
-        try:
-            parsed = urlparse(raw_url)
-            parsed_url = f"scheme={parsed.scheme}, netloc_host={parsed.hostname}, port={parsed.port}, path={parsed.path}"
-        except Exception as parse_err:
-            parsed_url = f"Error parsing: {parse_err}"
-            
-    return {
-        "env_keys": env_keys,
-        "resolved_url_structure": parsed_url,
-        "raw_value_present": bool(raw_url)
-    }
-
 @router.get("/bots/{bot_id}", status_code=status.HTTP_200_OK)
 async def get_public_bot(
     bot_id: uuid.UUID,

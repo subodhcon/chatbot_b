@@ -176,6 +176,16 @@ async def initialize_public_conversation(
         await mongo_client[db_name]["conversations"].insert_one(conv_doc)
         conv = Conversation(conv_doc)
 
+        # Cache conversation mapping in Redis
+        try:
+            from app.utils.redis import get_redis
+            redis_gen = get_redis()
+            redis_client = await redis_gen.__anext__()
+            if redis_client and not getattr(redis_client, "is_mock", False):
+                await redis_client.set(f"cache:conv_bot:{conv_id}", str(bot_id), ex=86400)
+        except Exception as cache_err:
+            logger.warning(f"Failed to cache conversation mapping in Redis: {cache_err}")
+
         # Track conversation started event
         from app.services.analytics_tracking import analytics_tracking_service
         try:
@@ -224,11 +234,37 @@ async def send_public_message(
     Send guest user message, run bot response service, and return bot response.
     """
     try:
-        # Load conversation from MongoDB & associated bot configuration
+        # Resolve bot_id dynamically for this conversation
+        from app.services.message import message_service
+        bot_id = await message_service._resolve_bot_id_for_conversation(db, conversation_id)
+        if not bot_id:
+            return api_error_response(
+                message="Session not found.",
+                code="SESSION_NOT_FOUND",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+            
+        config_res = await db.execute(
+            select(BotConfig).where(BotConfig.bot_id == bot_id)
+        )
+        config = config_res.scalars().first()
+
+        # Connect to bot's MongoDB
         from app.core.config import settings
         from app.core.mongo import mongo_registry
-        mongo_client = mongo_registry.get_client("public_endpoint", settings.MONGODB_URL)
-        conv_doc = await mongo_client["chatbot"]["conversations"].find_one({"_id": str(conversation_id)})
+        mongo_uri = None
+        db_name = "chatbot"
+        if config and config.use_custom_mongo:
+            mongo_uri = config.mongo_uri
+            db_name = config.mongo_db_name or "chatbot"
+        else:
+            mongo_uri = settings.MONGODB_URL
+            
+        if not mongo_uri:
+            raise ValueError("No MongoDB URL is configured for this bot.")
+            
+        mongo_client = mongo_registry.get_client(str(bot_id), mongo_uri)
+        conv_doc = await mongo_client[db_name]["conversations"].find_one({"_id": str(conversation_id)})
         if not conv_doc:
             return api_error_response(
                 message="Session not found.",
@@ -236,11 +272,6 @@ async def send_public_message(
                 status_code=status.HTTP_404_NOT_FOUND,
             )
         conv = Conversation(conv_doc)
-
-        config_res = await db.execute(
-            select(BotConfig).where(BotConfig.bot_id == conv.bot_id)
-        )
-        config = config_res.scalars().first()
 
         # --- Rate Limit Check ---
         ip_address = ""

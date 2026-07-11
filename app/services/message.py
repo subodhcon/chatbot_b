@@ -20,24 +20,77 @@ class MessageService:
     Orchestrates business logic for saving and retrieving conversation messages.
     """
 
+    async def _resolve_bot_id_for_conversation(self, db: AsyncSession, conversation_id: uuid.UUID) -> Optional[uuid.UUID]:
+        from app.utils.redis import get_redis
+        from sqlalchemy import select
+        from app.models.bot_config import BotConfig
+        from app.core.mongo import mongo_registry
+        from app.core.config import settings
+        
+        # 1. Try Redis first
+        redis_client = None
+        try:
+            redis_gen = get_redis()
+            redis_client = await redis_gen.__anext__()
+            if redis_client and not getattr(redis_client, "is_mock", False):
+                cached = await redis_client.get(f"cache:conv_bot:{conversation_id}")
+                if cached:
+                    val = cached.decode("utf-8") if isinstance(cached, bytes) else cached
+                    return uuid.UUID(val)
+        except Exception as re_err:
+            logger.warning(f"Redis lookup failed in resolve_bot_id: {re_err}")
+
+        # 2. Try main Mongo lookup if configured
+        if settings.MONGODB_URL and "localhost" not in settings.MONGODB_URL:
+            try:
+                mongo_client = mongo_registry.get_client("resolve_bot", settings.MONGODB_URL)
+                if mongo_client:
+                    conv_doc = await mongo_client["chatbot"]["conversations"].find_one({"_id": str(conversation_id)})
+                    if conv_doc and "bot_id" in conv_doc:
+                        bot_id = uuid.UUID(conv_doc["bot_id"])
+                        if redis_client and not getattr(redis_client, "is_mock", False):
+                            await redis_client.set(f"cache:conv_bot:{conversation_id}", str(bot_id), ex=86400)
+                        return bot_id
+            except Exception as mongo_err:
+                logger.warning(f"Main Mongo lookup failed in resolve_bot_id: {mongo_err}")
+
+        # 3. Multi-tenant scan: check each bot's custom MongoDB config
+        try:
+            bot_configs_res = await db.execute(select(BotConfig))
+            bot_configs = bot_configs_res.scalars().all()
+            for config in bot_configs:
+                mongo_uri = config.mongo_uri if config.use_custom_mongo else settings.MONGODB_URL
+                if not mongo_uri or (not config.use_custom_mongo and "localhost" in mongo_uri):
+                    continue
+                try:
+                    client = mongo_registry.get_client(str(config.bot_id), mongo_uri)
+                    if client:
+                        db_name = config.mongo_db_name if config.use_custom_mongo else "chatbot"
+                        conv_doc = await client[db_name]["conversations"].find_one({"_id": str(conversation_id)})
+                        if conv_doc:
+                            bot_id = config.bot_id
+                            if redis_client and not getattr(redis_client, "is_mock", False):
+                                await redis_client.set(f"cache:conv_bot:{conversation_id}", str(bot_id), ex=86400)
+                            return bot_id
+                except Exception as check_err:
+                    logger.debug(f"Failed to check mongo for bot {config.bot_id}: {check_err}")
+        except Exception as scan_err:
+            logger.error(f"Error during bot configs scan in resolve_bot_id: {scan_err}")
+
+        return None
+
     async def _get_mongo_collection(self, db: AsyncSession, conversation_id: uuid.UUID):
-        from app.models.conversation import Conversation
         from app.models.bot_config import BotConfig
         from app.core.mongo import mongo_registry
         from app.core.config import settings
         from sqlalchemy import select
 
-        conv = None
-        mongo_client = mongo_registry.get_client("message_service", settings.MONGODB_URL)
-        if mongo_client:
-            conv_doc = await mongo_client["chatbot"]["conversations"].find_one({"_id": str(conversation_id)})
-            if conv_doc:
-                conv = Conversation(conv_doc)
-        if not conv:
+        bot_id = await self._resolve_bot_id_for_conversation(db, conversation_id)
+        if not bot_id:
             return None, None
             
         bot_config_res = await db.execute(
-            select(BotConfig).where(BotConfig.bot_id == conv.bot_id)
+            select(BotConfig).where(BotConfig.bot_id == bot_id)
         )
         bot_config = bot_config_res.scalars().first()
         
@@ -51,9 +104,9 @@ class MessageService:
             mongo_uri = settings.MONGODB_URL
             
         if mongo_uri:
-            mongo_client = mongo_registry.get_client(str(conv.bot_id), mongo_uri)
+            mongo_client = mongo_registry.get_client(str(bot_id), mongo_uri)
             if mongo_client:
-                return mongo_client[db_name]["messages"], conv.bot_id
+                return mongo_client[db_name]["messages"], bot_id
         return None, None
 
     async def save_user_message(

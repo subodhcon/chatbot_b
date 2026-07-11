@@ -20,9 +20,10 @@ class UserRepository(BaseRepository[User]):
 
     async def get_user_by_email(self, db: AsyncSession, email: str) -> Optional[User]:
         """
-        Query a user record by their unique email address.
+        Query a user record by their unique email address (case-insensitive).
         """
-        result = await db.execute(select(User).filter(User.email == email))
+        normalized_email = email.strip().lower() if email else ""
+        result = await db.execute(select(User).filter(User.email == normalized_email))
         return result.scalars().first()
 
     async def create_user(self, db: AsyncSession, *, obj_in: Dict[str, Any]) -> User:

@@ -10,8 +10,6 @@ from app.db.session import get_async_db
 from app.dependencies import get_current_user
 from app.models.user import User
 from app.models.bot import Bot
-from app.models.conversation import Conversation, Message
-from app.models.document import Document
 from app.models.bot_config import BotConfig
 from app.core.responses import api_success_response, api_error_response
 from app.services.analytics_aggregation import analytics_aggregation_service
@@ -22,6 +20,7 @@ from app.repositories.export_job import export_job_repository
 from app.models.export_job import ExportJobStatus
 from app.utils.redis import get_redis
 from app.utils.cache import get_cached_val, set_cached_val
+from app.services.snapshot_service import snapshot_service
 
 router = APIRouter()
 
@@ -50,65 +49,96 @@ async def get_analytics_summary(
         user_bots_res = await db.execute(user_bots_query)
         bot_ids = user_bots_res.scalars().all()
 
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("analytics", settings.MONGODB_URL)
+        mongo_db = mongo_client["chatbot"] if mongo_client else None
+
         # 2. Conversations (24h)
         conv_24h_count = 0
-        if bot_ids:
+        if bot_ids and mongo_db:
             since_24h = datetime.now(timezone.utc) - timedelta(hours=24)
-            conv_query = select(func.count(Conversation.id)).where(Conversation.bot_id.in_(bot_ids)).where(Conversation.created_at >= since_24h)
-            conv_res = await db.execute(conv_query)
-            conv_24h_count = conv_res.scalar() or 0
+            conv_24h_count = await mongo_db["conversations"].count_documents({
+                "bot_id": {"$in": [str(bid) for bid in bot_ids]},
+                "created_at": {"$gte": since_24h}
+            })
 
         # 3. Knowledge Docs Count
-        doc_query = select(func.count(Document.id)).where(Document.created_by == current_user.id)
-        doc_res = await db.execute(doc_query)
-        knowledge_docs = doc_res.scalar() or 0
+        knowledge_docs = 0
+        if mongo_db:
+            knowledge_docs = await mongo_db["documents"].count_documents({
+                "created_by": str(current_user.id)
+            })
 
         # 4. Success Rate & Avg. Chat Time
         success_rate = 100.0
         total_sessions = 0
         avg_chat_time_seconds = 0
 
-        if bot_ids:
+        if bot_ids and mongo_db:
             # Total sessions
-            tot_query = select(func.count(Conversation.id)).where(Conversation.bot_id.in_(bot_ids))
-            tot_res = await db.execute(tot_query)
-            total_sessions = tot_res.scalar() or 0
+            total_sessions = await mongo_db["conversations"].count_documents({
+                "bot_id": {"$in": [str(bid) for bid in bot_ids]}
+            })
 
             # Calculate Success Rate
-            # To do this: check how many bot responses matched their bot's fallback message
             if total_sessions > 0:
-                # Find all bot messages
-                msg_query = (
-                    select(Message.content, BotConfig.fallback_message)
-                    .join(Conversation, Message.conversation_id == Conversation.id)
-                    .join(Bot, Conversation.bot_id == Bot.id)
-                    .join(BotConfig, Bot.id == BotConfig.bot_id)
+                bot_config_query = (
+                    select(BotConfig.bot_id, BotConfig.fallback_message)
+                    .join(Bot, BotConfig.bot_id == Bot.id)
                     .where(Bot.created_by == current_user.id)
-                    .where(Message.sender == "bot")
                 )
-                msg_res = await db.execute(msg_query)
-                bot_messages = msg_res.all()
+                bot_config_res = await db.execute(bot_config_query)
+                bot_config_map = {str(r.bot_id): r.fallback_message for r in bot_config_res.all()}
+
+                conv_cursor = mongo_db["conversations"].find(
+                    {"bot_id": {"$in": [str(bid) for bid in bot_ids]}},
+                    {"_id": 1, "bot_id": 1}
+                )
+                conv_bot_map = {}
+                async for c_doc in conv_cursor:
+                    conv_bot_map[c_doc["_id"]] = c_doc["bot_id"]
 
                 fallback_hits = 0
-                total_bot_responses = len(bot_messages)
+                total_bot_responses = 0
 
-                for msg_content, fallback in bot_messages:
-                    if fallback and msg_content == fallback:
-                        fallback_hits += 1
+                if conv_bot_map:
+                    messages_coll = mongo_db["messages"]
+                    cursor = messages_coll.find({
+                        "conversation_id": {"$in": list(conv_bot_map.keys())},
+                        "sender": "bot"
+                    })
+                    async for doc in cursor:
+                        total_bot_responses += 1
+                        conv_id = doc.get("conversation_id")
+                        content = doc.get("content", "")
+                        bot_id_str = conv_bot_map.get(conv_id)
+                        fallback = bot_config_map.get(bot_id_str)
+                        if fallback and content == fallback:
+                            fallback_hits += 1
 
                 if total_bot_responses > 0:
                     success_rate = round(((total_bot_responses - fallback_hits) / total_bot_responses) * 100, 1)
 
-            # Calculate Avg. Session Duration (time between first and last message in each conversation)
-            # Fetch conversation start/end times
-            time_query = (
-                select(Conversation.id, func.min(Message.created_at), func.max(Message.created_at))
-                .join(Message, Conversation.id == Message.conversation_id)
-                .where(Conversation.bot_id.in_(bot_ids))
-                .group_by(Conversation.id)
-            )
-            time_res = await db.execute(time_query)
-            durations = time_res.all()
+            # Calculate Avg. Session Duration
+            conv_ids = list(conv_bot_map.keys()) if 'conv_bot_map' in locals() else []
+            if conv_ids:
+                from app.core.config import settings
+                from app.core.mongo import mongo_registry
+                mongo_client = mongo_registry.get_client("analytics", settings.MONGODB_URL)
+                if mongo_client:
+                    messages_coll = mongo_client["chatbot"]["messages"]
+                    pipeline = [
+                        {"$match": {"conversation_id": {"$in": conv_ids}}},
+                        {"$group": {
+                            "_id": "$conversation_id",
+                            "min_time": {"$min": "$created_at"},
+                            "max_time": {"$max": "$created_at"}
+                        }}
+                    ]
+                    cursor = messages_coll.aggregate(pipeline)
+                    async for doc in cursor:
+                        durations.append((doc["_id"], doc["min_time"], doc["max_time"]))
 
             if durations:
                 total_duration_secs = 0
@@ -301,3 +331,94 @@ async def create_bot_data_export(
         )
 
 
+# ─────────────────────────────────────────────────────────────
+# Analytics Snapshot Endpoints
+# ─────────────────────────────────────────────────────────────
+
+@router.get("/bots/{bot_id}/snapshots", status_code=status.HTTP_200_OK)
+async def get_bot_snapshots(
+    bot_id: uuid.UUID,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Retrieve daily analytics snapshots for a bot within an optional date range.
+    Used for time-series chart rendering in the analytics dashboard.
+
+    Query params:
+        from_date: YYYY-MM-DD (defaults to 30 days ago)
+        to_date:   YYYY-MM-DD (defaults to yesterday)
+    """
+    try:
+        from datetime import date, timedelta
+
+        # Verify ownership
+        bot_q = await db.execute(select(Bot).where(Bot.id == bot_id, Bot.created_by == current_user.id))
+        bot = bot_q.scalars().first()
+        if not bot:
+            return api_error_response(
+                message="Bot not found.",
+                code="BOT_NOT_FOUND",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        today = date.today()
+        end = date.fromisoformat(to_date) if to_date else today - timedelta(days=1)
+        start = date.fromisoformat(from_date) if from_date else end - timedelta(days=29)
+
+        snapshots = await snapshot_service.get_snapshot_range(
+            bot_id=str(bot_id),
+            start_date=start,
+            end_date=end,
+        )
+
+        return api_success_response(data={"snapshots": snapshots, "count": len(snapshots)})
+
+    except Exception as e:
+        return api_error_response(
+            message="Failed to retrieve snapshots.",
+            code="SNAPSHOTS_FETCH_FAILED",
+            details=str(e),
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@router.post("/bots/{bot_id}/snapshots/generate", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_bot_snapshot(
+    bot_id: uuid.UUID,
+    date_str: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Manually trigger snapshot generation for a bot (admin on-demand refresh).
+    Dispatches a Celery task in background.
+    """
+    try:
+        # Verify ownership
+        bot_q = await db.execute(select(Bot).where(Bot.id == bot_id, Bot.created_by == current_user.id))
+        bot = bot_q.scalars().first()
+        if not bot:
+            return api_error_response(
+                message="Bot not found.",
+                code="BOT_NOT_FOUND",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        from app.tasks.analytics import generate_bot_snapshot_on_demand
+        generate_bot_snapshot_on_demand.delay(str(bot_id), date_str)
+
+        return api_success_response(
+            data={"message": "Snapshot generation queued.", "bot_id": str(bot_id), "date": date_str},
+            status_code=status.HTTP_202_ACCEPTED,
+        )
+
+    except Exception as e:
+        return api_error_response(
+            message="Failed to queue snapshot generation.",
+            code="SNAPSHOT_TRIGGER_FAILED",
+            details=str(e),
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )

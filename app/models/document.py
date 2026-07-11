@@ -1,45 +1,15 @@
 import uuid
-from typing import TYPE_CHECKING
-from sqlalchemy import String, Integer, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-from app.db.base_class import Base, UUIDPrimaryKeyMixin, TimestampMixin
+import datetime
 
-if TYPE_CHECKING:
-    from app.models.user import User
-
-
-class Document(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+class Document:
     """
-    Document model representing training materials uploaded to the knowledge base.
+    Document wrapper representing uploaded file metadata in MongoDB.
     """
-    __tablename__ = "documents"
-
-    filename: Mapped[str] = mapped_column(
-        String(255),
-        nullable=False,
-    )
-
-    file_path: Mapped[str] = mapped_column(
-        String(512),
-        nullable=False,
-    )
-
-    file_size: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        comment="Size of file in bytes",
-    )
-
-    created_by: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-
-    # Relationship
-    creator: Mapped["User"] = relationship(
-        "User",
-        lazy="select",
-    )
+    def __init__(self, doc):
+        self.id = uuid.UUID(doc["_id"]) if isinstance(doc["_id"], str) else doc["_id"]
+        self.filename = doc.get("filename")
+        self.file_path = doc.get("file_path")
+        self.file_size = doc.get("file_size")
+        self.created_by = uuid.UUID(doc["created_by"]) if isinstance(doc["created_by"], str) else doc["created_by"]
+        self.created_at = doc.get("created_at") or datetime.datetime.utcnow()
+        self.updated_at = doc.get("updated_at") or datetime.datetime.utcnow()

@@ -15,7 +15,7 @@ from app.core.security import decode_token
 from app.repositories.user import user_repository
 from app.models.bot import Bot
 from app.models.bot_config import BotConfig
-from app.models.conversation import Conversation, Message
+from app.models.conversation import Conversation
 
 router = APIRouter()
 logger = logging.getLogger("app.api.websocket")
@@ -188,13 +188,8 @@ async def websocket_endpoint(
             )
 
             # Load historical logs for context (includes the message we just saved)
-            hist_query = (
-                select(Message)
-                .where(Message.conversation_id == conv_uuid)
-                .order_by(Message.created_at.asc())
-            )
-            hist_res = await db.execute(hist_query)
-            msg_rows = hist_res.scalars().all()
+            from app.services.message import message_service
+            msg_rows = await message_service.fetch_conversation_history(db, conversation_id=conv_uuid)
 
             history_payload = [
                 {"role": "assistant" if m.sender == "bot" else "user", "content": m.content}

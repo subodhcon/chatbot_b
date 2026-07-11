@@ -76,8 +76,16 @@ async def get_current_user_profile(
     """
     Retrieve details of the currently authenticated user.
     """
-    user_data = jsonable_encoder(UserResponse.model_validate(current_user))
-    return api_success_response(data=user_data, status_code=status.HTTP_200_OK)
+    try:
+        user_data = jsonable_encoder(UserResponse.model_validate(current_user))
+        return api_success_response(data=user_data, status_code=status.HTTP_200_OK)
+    except Exception as e:
+        return api_error_response(
+            message="Failed to retrieve current user profile.",
+            code="GET_PROFILE_FAILED",
+            details=str(e),
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 @router.put("/profile", response_model=UserResponse, status_code=status.HTTP_200_OK)
 async def update_profile(
@@ -91,21 +99,11 @@ async def update_profile(
     try:
         # Check if email is being changed
         if profile_in.email != current_user.email:
-            # Prevent superadmins from changing their email address
-            if current_user.role == "superadmin":
-                return api_error_response(
-                    message="Superadmin email address cannot be changed.",
-                    code="SUPERADMIN_EMAIL_CHANGE_PREVENTED",
-                    status_code=status.HTTP_400_BAD_REQUEST
-                )
-            
-            existing = await user_repository.get_user_by_email(db, email=profile_in.email)
-            if existing:
-                return api_error_response(
-                    message="Email already in use.",
-                    code="EMAIL_ALREADY_IN_USE",
-                    status_code=status.HTTP_400_BAD_REQUEST
-                )
+            return api_error_response(
+                message="Email address cannot be changed.",
+                code="EMAIL_CHANGE_PREVENTED",
+                status_code=status.HTTP_400_BAD_REQUEST
+            )
         
         current_user.name = profile_in.name
         current_user.email = profile_in.email

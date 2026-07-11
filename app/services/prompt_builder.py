@@ -54,10 +54,10 @@ class PromptBuilderService:
         system_prompt_parts.append(
             "\n[RETRIEVAL RULES]\n"
             "1. You will be provided with context chunks retrieved from the knowledge base.\n"
-            "2. Answer the user's question using ONLY the provided context chunks.\n"
-            "3. If the context does not contain the answer, or if there is no context provided, state clearly that you cannot answer based on the available information, or follow the fallback instruction (if provided).\n"
+            "2. Answer the user's question using the provided context chunks. If the user query is a keyword, short phrase, or incomplete question, interpret it in the context of the retrieved chunks (e.g., if they say 'capital' and the context contains information about the capital of India, answer with 'New Delhi is the capital of India').\n"
+            "3. If the context does not contain the answer or any relevant information to help answer the query, state clearly that you cannot answer based on the available information, or follow the fallback instruction (if provided).\n"
             "4. Maintain a natural conversation. Do NOT explicitly say 'Based on the provided context' or 'According to the retrieved chunks' or similar phrases. Answer as if you naturally know the information.\n"
-            "5. Keep responses concise, conversational, and highly readable. Avoid writing long essays or massive paragraphs. Use clean bullet points for lists and bold highlights for readability. Try to keep the final answer under 3-4 sentences unless a detailed explanation is explicitly requested."
+            "5. Keep responses concise, conversational, and highly readable. Avoid writing long essays or massive paragraphs. If the answer contains a list of items, places, names, or options, you MUST format them as a clean bulleted list (using Markdown '*' or '-') with bold highlights for readability. This formatting rule is strict and applies to all languages, including English, Hindi, and Hinglish. Keep the final answer well-structured and easy to read."
         )
 
         # 5. Fallback instruction (when the bot has a configured fallback message)

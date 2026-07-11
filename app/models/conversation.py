@@ -1,98 +1,15 @@
 import uuid
-from typing import TYPE_CHECKING, List, Optional
-from sqlalchemy import String, Text, ForeignKey, Index
-from sqlalchemy.dialects.postgresql import UUID, JSONB
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-from app.db.base_class import Base, UUIDPrimaryKeyMixin, TimestampMixin
+import datetime
+from typing import Optional
 
-if TYPE_CHECKING:
-    from app.models.bot import Bot
-
-
-class Conversation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+class Conversation:
     """
-    Conversation model representing a single chat session between a user and a bot.
+    Conversation wrapper representing a single MongoDB-backed chat session metadata.
     """
-    __tablename__ = "conversations"
-
-    bot_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("bots.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-
-    user_identifier: Mapped[str] = mapped_column(
-        String(100),
-        nullable=False,
-        default="Anonymous User",
-        comment="Human readable unique placeholder identifier, e.g. User #8294",
-    )
-
-    browser_info: Mapped[Optional[dict]] = mapped_column(
-        JSONB,
-        nullable=True,
-        comment="Metadata about the visitor browser, OS, and viewport sizes",
-    )
-
-    # Relationships
-    bot: Mapped["Bot"] = relationship(
-        "Bot",
-        lazy="select",
-    )
-
-    messages: Mapped[List["Message"]] = relationship(
-        "Message",
-        back_populates="conversation",
-        cascade="all, delete-orphan",
-        order_by="Message.created_at",
-        lazy="select",
-    )
-
-
-class Message(Base, UUIDPrimaryKeyMixin, TimestampMixin):
-    """
-    Message model representing an individual chat bubble inside a Conversation.
-    """
-    __tablename__ = "messages"
-
-    conversation_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("conversations.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-
-    sender: Mapped[str] = mapped_column(
-        String(50),
-        nullable=False,
-        comment="Sender identity: 'user' or 'bot'",
-    )
-
-    content: Mapped[str] = mapped_column(
-        Text,
-        nullable=False,
-        comment="Text content of the message",
-    )
-
-    # Relationships
-    conversation: Mapped["Conversation"] = relationship(
-        "Conversation",
-        back_populates="messages",
-        lazy="select",
-    )
-
-
-# Composite index on Conversations: (bot_id, created_at DESC)
-Index(
-    "ix_conversations_bot_id_created_at",
-    Conversation.bot_id,
-    Conversation.created_at.desc(),
-)
-
-# Composite index on Messages: (conversation_id, created_at ASC)
-Index(
-    "ix_messages_conversation_id_created_at",
-    Message.conversation_id,
-    Message.created_at.asc(),
-)
+    def __init__(self, doc):
+        self.id = uuid.UUID(doc["_id"]) if isinstance(doc["_id"], str) else doc["_id"]
+        self.bot_id = uuid.UUID(doc["bot_id"]) if isinstance(doc["bot_id"], str) else doc["bot_id"]
+        self.user_identifier = doc.get("user_identifier", "Anonymous User")
+        self.browser_info = doc.get("browser_info")
+        self.created_at = doc.get("created_at") or datetime.datetime.utcnow()
+        self.updated_at = doc.get("updated_at") or datetime.datetime.utcnow()

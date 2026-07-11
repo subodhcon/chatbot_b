@@ -7,7 +7,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.conversation import Conversation, Message
+from app.models.conversation import Conversation
 from app.models.feedback_rating import FeedbackRating
 from app.models.bot_config import BotConfig
 from app.core.config import settings
@@ -42,27 +42,47 @@ class CSVExportService:
         config_res = await db.execute(config_query)
         gdpr_enabled = config_res.scalar() or False
 
-        # 1. Query messages, conversation parent data, and optional feedback ratings
-        query = (
-            select(
-                Message.conversation_id,
-                Message.created_at,
-                Message.sender,
-                Message.content,
-                FeedbackRating.rating,
-            )
-            .join(Conversation, Message.conversation_id == Conversation.id)
-            .outerjoin(FeedbackRating, Message.id == FeedbackRating.message_id)
-            .where(
-                Conversation.bot_id == bot_id,
-                Conversation.created_at >= start_date,
-                Conversation.created_at <= end_date,
-            )
-            .order_by(Conversation.created_at.asc(), Message.created_at.asc())
+        # 1. Query conversations within range
+        conv_query = select(Conversation.id).where(
+            Conversation.bot_id == bot_id,
+            Conversation.created_at >= start_date,
+            Conversation.created_at <= end_date,
         )
+        conv_res = await db.execute(conv_query)
+        conv_ids = [str(cid) for cid in conv_res.scalars().all()]
 
-        result = await db.execute(query)
-        rows = result.all()
+        # Query feedback ratings for these conversations
+        feedback_map = {}
+        if conv_ids:
+            feedback_query = select(FeedbackRating.message_id, FeedbackRating.rating).where(
+                FeedbackRating.conversation_id.in_([uuid.UUID(cid) for cid in conv_ids])
+            )
+            feedback_res = await db.execute(feedback_query)
+            feedback_map = {str(r.message_id): r.rating for r in feedback_res.all()}
+
+        # Fetch messages from MongoDB
+        mongo_messages = []
+        if conv_ids:
+            from app.core.config import settings
+            from app.core.mongo import mongo_registry
+            mongo_client = mongo_registry.get_client(str(bot_id), settings.MONGODB_URL)
+            if mongo_client:
+                messages_coll = mongo_client["chatbot"]["messages"]
+                cursor = messages_coll.find({
+                    "conversation_id": {"$in": conv_ids}
+                }).sort([("conversation_id", 1), ("created_at", 1)])
+                async for doc in cursor:
+                    mongo_messages.append(doc)
+
+        rows = []
+        for doc in mongo_messages:
+            msg_id = doc["_id"]
+            conv_id = doc["conversation_id"]
+            created_at = doc["created_at"]
+            sender = doc["sender"]
+            content = doc["content"]
+            rating = feedback_map.get(str(msg_id))
+            rows.append((conv_id, created_at, sender, content, rating))
 
         # 2. Setup export target directory
         os.makedirs(export_dir, exist_ok=True)

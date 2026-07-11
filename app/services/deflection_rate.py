@@ -5,8 +5,7 @@ from typing import Optional
 from sqlalchemy import select, func, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.conversation import Conversation
-from app.models.analytics_event import AnalyticsEvent
+
 
 logger = logging.getLogger("app.services.deflection_rate")
 
@@ -33,41 +32,42 @@ class DeflectionRateService:
         """
         logger.info(f"Calculating deflection rate for bot {bot_id}")
 
-        # Construct time filters
-        time_filters = []
-        if start_date:
-            time_filters.append(Conversation.created_at >= start_date)
-        if end_date:
-            time_filters.append(Conversation.created_at <= end_date)
+        # 1. Total conversations count from MongoDB
+        query = {"bot_id": str(bot_id)}
+        if start_date or end_date:
+            date_filter = {}
+            if start_date:
+                date_filter["$gte"] = start_date
+            if end_date:
+                date_filter["$lte"] = end_date
+            query["created_at"] = date_filter
 
-        # 1. Total conversations count
-        total_query = select(func.count(Conversation.id)).where(
-            Conversation.bot_id == bot_id,
-            *time_filters
-        )
-        total_res = await db.execute(total_query)
-        total_conversations = total_res.scalar_one() or 0
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("deflection_rate", settings.MONGODB_URL)
+        if not mongo_client:
+            return 0.0
 
+        db_name = "chatbot"
+        conv_coll = mongo_client[db_name]["conversations"]
+        events_coll = mongo_client[db_name]["analytics_events"]
+
+        total_conversations = await conv_coll.count_documents(query)
         if total_conversations == 0:
             return 0.0
 
+        # Get conversation IDs
+        cursor = conv_coll.find(query, {"_id": 1})
+        conv_ids = [doc["_id"] async for doc in cursor]
+
         # 2. Escalated conversations count
-        # Extensible design: Escalation is identified by event types logging handovers
-        escalated_query = (
-            select(func.count(func.distinct(Conversation.id)))
-            .join(AnalyticsEvent, AnalyticsEvent.conversation_id == Conversation.id)
-            .where(
-                Conversation.bot_id == bot_id,
-                func.cast(AnalyticsEvent.event_type, String).in_([
-                    "escalation_triggered",
-                    "human_handover",
-                    "agent_requested"
-                ]),
-                *time_filters
-            )
-        )
-        escalated_res = await db.execute(escalated_query)
-        escalated_conversations = escalated_res.scalar_one() or 0
+        escalated_conversations = 0
+        if conv_ids:
+            escalation_types = ["escalation_triggered", "human_handover", "agent_requested"]
+            escalated_conversations = len(await events_coll.distinct("conversation_id", {
+                "conversation_id": {"$in": conv_ids},
+                "event_type": {"$in": escalation_types}
+            }))
 
         deflected_conversations = total_conversations - escalated_conversations
         deflection_rate = (deflected_conversations / total_conversations) * 100

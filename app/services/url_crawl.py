@@ -129,6 +129,8 @@ class UrlCrawlService:
         # Strip trailing slash if it's not the root path
         if len(path) > 1 and normalized.endswith("/"):
             normalized = normalized[:-1]
+        if parsed.query:
+            normalized = f"{normalized}?{parsed.query}"
         return normalized
 
     def crawl(self, start_url: str, max_depth: int = 1) -> dict[str, str]:

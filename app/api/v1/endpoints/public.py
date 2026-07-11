@@ -8,10 +8,11 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
+from datetime import datetime
 from app.db.session import get_async_db
 from app.models.bot import Bot
 from app.models.bot_config import BotConfig
-from app.models.conversation import Conversation, Message
+from app.models.conversation import Conversation
 from app.models.feedback_rating import FeedbackRatingValue
 from app.services.chat_agent import chat_agent_service
 from app.services import conversation_service, message_service
@@ -21,6 +22,8 @@ from app.repositories.feedback_rating import feedback_rating_repository
 from app.core.responses import api_success_response, api_error_response
 from app.utils.redis import get_redis
 from app.utils.cache import get_cached_val, set_cached_val
+from app.services.rate_limiter import rate_limiter_service
+from app.services.typing_indicator import typing_indicator_service
 
 router = APIRouter()
 logger = logging.getLogger("app.api.public")
@@ -142,16 +145,21 @@ async def initialize_public_conversation(
         bot, config = row
         user_identifier = f"Guest #{random.randint(1000, 9999)}"
 
-        # Create conversation
-        conv = Conversation(
-            id=uuid.uuid4(),
-            bot_id=bot_id,
-            user_identifier=user_identifier,
-            browser_info=combined_browser_info,
-        )
-        db.add(conv)
-        await db.commit()
-        await db.refresh(conv)
+        # Create conversation in MongoDB
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("public_endpoint", settings.MONGODB_URL)
+        conv_id = str(uuid.uuid4())
+        conv_doc = {
+            "_id": conv_id,
+            "bot_id": str(bot_id),
+            "user_identifier": user_identifier,
+            "browser_info": combined_browser_info,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+        }
+        await mongo_client["chatbot"]["conversations"].insert_one(conv_doc)
+        conv = Conversation(conv_doc)
 
         # Track conversation started event
         from app.services.analytics_tracking import analytics_tracking_service
@@ -166,25 +174,13 @@ async def initialize_public_conversation(
 
         # Add initial welcome message from bot
         welcome_text = config.welcome_message or "Hello! How can I help you?"
-        welcome_msg = Message(
-            id=uuid.uuid4(),
+        from app.services.message import message_service
+        await message_service.save_assistant_message(
+            db,
             conversation_id=conv.id,
-            sender="bot",
             content=welcome_text,
         )
-        db.add(welcome_msg)
-        await db.commit()
 
-        # Track welcome message (bot response)
-        try:
-            await analytics_tracking_service.track_bot_response(
-                db,
-                bot_id=bot_id,
-                conversation_id=conv.id,
-                response_length=len(welcome_text),
-            )
-        except Exception as tracker_err:
-            logger.error(f"Failed to track bot response: {tracker_err}", exc_info=True)
 
         response_data = {
             "conversation_id": str(conv.id),
@@ -213,60 +209,61 @@ async def send_public_message(
     Send guest user message, run bot response service, and return bot response.
     """
     try:
-        # Load conversation & associated bot configuration
-        query = (
-            select(Conversation, BotConfig)
-            .join(Bot, Conversation.bot_id == Bot.id)
-            .join(BotConfig, Bot.id == BotConfig.bot_id)
-            .where(Conversation.id == conversation_id)
-        )
-        result = await db.execute(query)
-        row = result.first()
-
-        if not row:
+        # Load conversation from MongoDB & associated bot configuration
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("public_endpoint", settings.MONGODB_URL)
+        conv_doc = await mongo_client["chatbot"]["conversations"].find_one({"_id": str(conversation_id)})
+        if not conv_doc:
             return api_error_response(
                 message="Session not found.",
                 code="SESSION_NOT_FOUND",
                 status_code=status.HTTP_404_NOT_FOUND,
             )
+        conv = Conversation(conv_doc)
 
-        conv, config = row
+        config_res = await db.execute(
+            select(BotConfig).where(BotConfig.bot_id == conv.bot_id)
+        )
+        config = config_res.scalars().first()
 
-        # 1. Save guest message
-        user_msg = Message(
-            id=uuid.uuid4(),
+        # --- Rate Limit Check ---
+        ip_address = ""
+        is_allowed, retry_after = await rate_limiter_service.check_and_record(
+            conversation_id=str(conversation_id),
+            bot_id=str(conv.bot_id),
+            ip_address=ip_address,
+            visitor_identifier=conv_doc.get("user_identifier", ""),
+        )
+        if not is_allowed:
+            return api_error_response(
+                message=f"Too many messages. Please wait {retry_after} seconds before sending again.",
+                code="RATE_LIMIT_EXCEEDED",
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        # 1. Save guest message using service
+        from app.services.message import message_service
+        user_msg = await message_service.save_user_message(
+            db,
             conversation_id=conversation_id,
-            sender="user",
             content=content,
         )
-        db.add(user_msg)
-        await db.commit()
 
-        # Track user message sent
-        from app.services.analytics_tracking import analytics_tracking_service
-        try:
-            await analytics_tracking_service.track_message_sent(
-                db,
-                bot_id=conv.bot_id,
-                conversation_id=conversation_id,
-                sender="user",
-                message_length=len(content),
-            )
-        except Exception as tracker_err:
-            logger.error(f"Failed to track user message: {tracker_err}", exc_info=True)
+        # Update conversation timestamp in MongoDB
+        await mongo_client["chatbot"]["conversations"].update_one(
+            {"_id": str(conversation_id)},
+            {"$set": {"updated_at": datetime.utcnow()}}
+        )
 
-        # Update conversation timestamp
-        conv.updated_at = func.now()
-        await db.commit()
+        # --- Set Typing Indicator (bot is generating response) ---
+        await typing_indicator_service.set_typing(
+            conversation_id=str(conversation_id),
+            bot_id=str(conv.bot_id),
+        )
 
         # 2. Load historical logs for context
-        hist_query = (
-            select(Message)
-            .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.asc())
-        )
-        hist_res = await db.execute(hist_query)
-        msg_rows = hist_res.scalars().all()
+        msg_rows = await message_service.fetch_conversation_history(db, conversation_id=conversation_id)
 
         history_payload = [
             {"role": "assistant" if m.sender == "bot" else "user", "content": m.content}
@@ -308,26 +305,14 @@ async def send_public_message(
             escalation_eligible = True
 
         # 4. Save bot message
-        bot_msg = Message(
-            id=uuid.uuid4(),
+        bot_msg = await message_service.save_assistant_message(
+            db,
             conversation_id=conversation_id,
-            sender="bot",
             content=bot_reply,
         )
-        db.add(bot_msg)
-        await db.commit()
-        await db.refresh(bot_msg)
 
-        # Track bot response
-        try:
-            await analytics_tracking_service.track_bot_response(
-                db,
-                bot_id=conv.bot_id,
-                conversation_id=conversation_id,
-                response_length=len(bot_reply),
-            )
-        except Exception as tracker_err:
-            logger.error(f"Failed to track bot response: {tracker_err}", exc_info=True)
+        # --- Clear Typing Indicator ---
+        await typing_indicator_service.clear_typing(str(conversation_id))
 
         reply_data = {
             "id": str(bot_msg.id),
@@ -342,9 +327,34 @@ async def send_public_message(
         return api_success_response(data=reply_data, status_code=status.HTTP_201_CREATED)
 
     except Exception as e:
+        # Always clear typing on error too
+        try:
+            await typing_indicator_service.clear_typing(str(conversation_id))
+        except Exception:
+            pass
         return api_error_response(
             message="An error occurred while generating chatbot reply.",
             code="REPLY_FAILED",
+            details=str(e),
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@router.get("/conversations/{conversation_id}/typing", status_code=status.HTTP_200_OK)
+async def get_typing_status(conversation_id: uuid.UUID):
+    """
+    Poll whether the bot is currently generating a response for this conversation.
+    Widget can call this every 500ms to show/hide the typing indicator.
+
+    Returns: { "is_typing": bool, "started_at": str | null }
+    """
+    try:
+        result = await typing_indicator_service.get_status(str(conversation_id))
+        return api_success_response(data=result)
+    except Exception as e:
+        return api_error_response(
+            message="Failed to get typing status.",
+            code="TYPING_STATUS_FAILED",
             details=str(e),
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
@@ -361,24 +371,23 @@ async def send_widget_placeholder_message(
     Saves user message, creates a placeholder bot reply using the service layer, and stores both in DB.
     """
     try:
-        # Load conversation & associated bot configuration
-        query = (
-            select(Conversation, BotConfig)
-            .join(Bot, Conversation.bot_id == Bot.id)
-            .join(BotConfig, Bot.id == BotConfig.bot_id)
-            .where(Conversation.id == conversation_id)
-        )
-        result = await db.execute(query)
-        row = result.first()
-
-        if not row:
+        # Load conversation from MongoDB & associated bot configuration
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("public_endpoint", settings.MONGODB_URL)
+        conv_doc = await mongo_client["chatbot"]["conversations"].find_one({"_id": str(conversation_id)})
+        if not conv_doc:
             return api_error_response(
                 message="Session not found.",
                 code="SESSION_NOT_FOUND",
                 status_code=status.HTTP_404_NOT_FOUND,
             )
+        conv = Conversation(conv_doc)
 
-        conv, config = row
+        config_res = await db.execute(
+            select(BotConfig).where(BotConfig.bot_id == conv.bot_id)
+        )
+        config = config_res.scalars().first()
 
         # 1. Save user message using service layer
         await message_service.save_user_message(
@@ -395,13 +404,7 @@ async def send_widget_placeholder_message(
         )
 
         # Load historical logs for context (includes the message we just saved)
-        hist_query = (
-            select(Message)
-            .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.asc())
-        )
-        hist_res = await db.execute(hist_query)
-        msg_rows = hist_res.scalars().all()
+        msg_rows = await message_service.fetch_conversation_history(db, conversation_id=conversation_id)
 
         history_payload = [
             {"role": "assistant" if m.sender == "bot" else "user", "content": m.content}
@@ -578,16 +581,32 @@ async def submit_message_feedback(
     Stores the feedback in database and logs an analytics event.
     """
     try:
-        # 1. Verify message and conversation exist
-        msg_query = (
-            select(Message)
-            .where(Message.id == payload.message_id)
-            .where(Message.conversation_id == payload.conversation_id)
-        )
-        msg_res = await db.execute(msg_query)
-        message = msg_res.scalar_one_or_none()
-        
-        if not message:
+        # 1. Verify message and conversation exist in MongoDB
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("public", settings.MONGODB_URL)
+        conv_doc = None
+        if mongo_client:
+            conv_doc = await mongo_client["chatbot"]["conversations"].find_one({"_id": str(payload.conversation_id)})
+        if not conv_doc:
+            return api_error_response(
+                message="Message or Conversation not found.",
+                code="MESSAGE_NOT_FOUND",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        conv = Conversation(conv_doc)
+            
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("public", settings.MONGODB_URL)
+        msg_found = False
+        if mongo_client:
+            messages_coll = mongo_client["chatbot"]["messages"]
+            doc = await messages_coll.find_one({"_id": str(payload.message_id), "conversation_id": str(payload.conversation_id)})
+            if doc:
+                msg_found = True
+                
+        if not msg_found:
             return api_error_response(
                 message="Message or Conversation not found.",
                 code="MESSAGE_NOT_FOUND",
@@ -606,9 +625,6 @@ async def submit_message_feedback(
         # 3. Track the feedback event in analytics
         from app.services.analytics_tracking import analytics_tracking_service
         try:
-            conv_query = select(Conversation).where(Conversation.id == payload.conversation_id)
-            conv_res = await db.execute(conv_query)
-            conv = conv_res.scalar_one_or_none()
             if conv:
                 await analytics_tracking_service.track_feedback_submitted(
                     db,

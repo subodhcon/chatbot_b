@@ -23,6 +23,48 @@ class AIResponsePipelineService:
     5. OpenAI Chat Completion (standard or streaming)
     6. Citation resolution & metadata attachment
     """
+    
+    async def _condense_query(
+        self,
+        user_question: str,
+        chat_history: List[Dict[str, str]] = None,
+        model_name: str = "gpt-4o-mini"
+    ) -> str:
+        if not chat_history or len(chat_history) == 0:
+            return user_question
+
+        # Format recent chat history for the condensation prompt
+        history_str = ""
+        for msg in chat_history[-5:]:
+            role = "User" if msg.get("role") == "user" else "Assistant"
+            content = msg.get("content", "")
+            history_str += f"{role}: {content}\n"
+
+        prompt = f"""Given the following conversation history and a follow-up question, rephrase the follow-up question to be a standalone search query, in its original language, that contains all necessary context from the conversation history. Do not write anything other than the rephrased standalone query.
+
+Conversation History:
+{history_str}
+Follow-up Question: {user_question}
+
+Standalone Query:"""
+
+        try:
+            res = await openai_chat_service.generate_response(
+                system_prompt="You are a query rewriting assistant. Rewrite the user's follow-up question into a standalone, descriptive search query.",
+                user_prompt=prompt,
+                chat_history=None,
+                model_name=model_name,
+                temperature=0.0,
+                max_tokens=64,
+            )
+            condensed = res.get("answer", "").strip()
+            if condensed:
+                logger.info(f"[Condensation] Rewrote '{user_question}' -> '{condensed}'")
+                return condensed
+        except Exception as e:
+            logger.warning(f"[Condensation] Failed to condense query: {e}. Falling back to raw question.")
+            
+        return user_question
 
     async def generate_response(
         self,
@@ -54,7 +96,8 @@ class AIResponsePipelineService:
         try:
             # Step 1: Embedding generation
             logger.info(f"Generating query embedding for bot {bot_id}...")
-            query_vector = openai_embedding_service.generate_embedding(user_question)
+            condensed_question = await self._condense_query(user_question, chat_history, model_name=model_name)
+            query_vector = openai_embedding_service.generate_embedding(condensed_question)
 
             # Step 2: Vector Search
             logger.info(f"Performing vector similarity search (top_k={top_k}, similarity_threshold={similarity_threshold})...")
@@ -160,7 +203,8 @@ class AIResponsePipelineService:
         """
         try:
             # Step 1: Embedding generation
-            query_vector = openai_embedding_service.generate_embedding(user_question)
+            condensed_question = await self._condense_query(user_question, chat_history, model_name=model_name)
+            query_vector = openai_embedding_service.generate_embedding(condensed_question)
 
             # Step 2: Vector Search
             retrieved_chunks = await vector_search_service.search_similar_chunks(

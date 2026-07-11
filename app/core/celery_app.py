@@ -17,11 +17,18 @@ celery_app.conf.update(
     task_send_sent_event=True,  # Enables monitoring tools like Flower to track events
 )
 
+celery_app.conf.beat_schedule = {
+    # Generate daily analytics snapshots for all active bots at 00:05 UTC every day
+    "generate-daily-bot-snapshots": {
+        "task": "tasks.generate_all_bot_snapshots",
+        "schedule": 86400.0,  # Every 24 hours (in seconds)
+        # Cron alternative: crontab(hour=0, minute=5)
+    },
+}
+
 # Auto-discover tasks from submodules inside app
 celery_app.autodiscover_tasks(["app"])
 
 # Explicitly import modules containing tasks to ensure registration
 import app.tasks.ingestion  # noqa: F401
-
-
-
+import app.tasks.analytics  # noqa: F401

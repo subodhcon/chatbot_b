@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Optional
 from sqlalchemy import select, func, Date, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.conversation import Conversation, Message
+from app.models.conversation import Conversation
 from app.models.feedback_rating import FeedbackRating, FeedbackRatingValue
 from app.models.analytics_event import AnalyticsEvent, AnalyticsEventType
 
@@ -46,16 +46,30 @@ class AnalyticsAggregationService:
         total_conversations = conv_res.scalar_one() or 0
 
         # 2. Total Messages
-        msg_query = (
-            select(func.count(Message.id))
-            .join(Conversation, Message.conversation_id == Conversation.id)
-            .where(
-                Conversation.bot_id == bot_id,
-                *time_filters
-            )
+        conv_ids_query = select(Conversation.id).where(
+            Conversation.bot_id == bot_id,
+            *time_filters
         )
-        msg_res = await db.execute(msg_query)
-        total_messages = msg_res.scalar_one() or 0
+        conv_ids_res = await db.execute(conv_ids_query)
+        conv_ids = [str(cid) for cid in conv_ids_res.scalars().all()]
+        
+        total_messages = 0
+        if conv_ids:
+            from app.core.config import settings
+            from app.core.mongo import mongo_registry
+            from app.models.bot_config import BotConfig
+            
+            bot_config_res = await db.execute(
+                select(BotConfig).where(BotConfig.bot_id == bot_id)
+            )
+            bot_config = bot_config_res.scalars().first()
+            mongo_uri = (bot_config.mongo_uri or settings.MONGODB_URL) if bot_config else settings.MONGODB_URL
+            if mongo_uri:
+                mongo_client = mongo_registry.get_client(str(bot_id), mongo_uri)
+                if mongo_client:
+                    db_name = bot_config.mongo_db_name or "chatbot" if bot_config else "chatbot"
+                    messages_coll = mongo_client[db_name]["messages"]
+                    total_messages = await messages_coll.count_documents({"conversation_id": {"$in": conv_ids}})
 
         # 3. Thumbs Up Ratings
         thumbs_up_query = (

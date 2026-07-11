@@ -1,7 +1,6 @@
 import uuid
 import logging
 from typing import Optional, List, Dict, Any
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.repositories.ingestion_job import ingestion_job_repository
 from app.models.ingestion_job import IngestionJob, IngestionJobStatus
@@ -71,11 +70,15 @@ class IngestionService:
         Returns a combined dict with source + job data.
         Raises ValueError if source not found or doesn't belong to bot.
         """
-        # Fetch source
-        result = await db.execute(
-            select(KnowledgeSource).where(KnowledgeSource.id == source_id)
-        )
-        source = result.scalars().first()
+        # Fetch source from MongoDB
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("ingestion_service", settings.MONGODB_URL)
+        source = None
+        if mongo_client:
+            doc = await mongo_client["chatbot"]["knowledge_sources"].find_one({"_id": str(source_id)})
+            if doc:
+                source = KnowledgeSource(doc)
 
         if not source:
             raise ValueError(f"Knowledge source not found: {source_id}")

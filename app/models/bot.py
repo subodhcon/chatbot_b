@@ -9,7 +9,6 @@ if TYPE_CHECKING:
     from app.models.user import User
     from app.models.bot_version import BotVersion
     from app.models.bot_config import BotConfig
-    from app.models.url_crawl import UrlCrawl
     from app.models.bot_manager import BotManager
 
 
@@ -77,13 +76,7 @@ class Bot(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         lazy="select",
     )
 
-    # Relationship — all URL crawls associated with this bot
-    crawls: Mapped[List["UrlCrawl"]] = relationship(  # type: ignore[name-defined]
-        "UrlCrawl",
-        back_populates="bot",
-        cascade="all, delete-orphan",
-        lazy="select",
-    )
+
 
     # Relationship — all managers associated with this bot
     managers: Mapped[List["BotManager"]] = relationship(

@@ -28,17 +28,23 @@ async def upload_document(
         # Save and validate using FileUploadService
         unique_name, file_path, file_size = await file_upload_service.save_file(file)
 
-        # Create document row
-        db_doc = Document(
-            id=uuid.uuid4(),
-            filename=file.filename,
-            file_path=file_path,
-            file_size=file_size,
-            created_by=current_user.id,
-        )
-        db.add(db_doc)
-        await db.commit()
-        await db.refresh(db_doc)
+        # Create document row in MongoDB
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        from datetime import datetime
+        mongo_client = mongo_registry.get_client("documents", settings.MONGODB_URL)
+        doc_id = str(uuid.uuid4())
+        doc_data_mongo = {
+            "_id": doc_id,
+            "filename": file.filename,
+            "file_path": file_path,
+            "file_size": file_size,
+            "created_by": str(current_user.id),
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+        }
+        await mongo_client["chatbot"]["documents"].insert_one(doc_data_mongo)
+        db_doc = Document(doc_data_mongo)
 
         doc_data = {
             "id": str(db_doc.id),
@@ -74,9 +80,13 @@ async def list_documents(
     List all uploaded training documents.
     """
     try:
-        query = select(Document).where(Document.created_by == current_user.id).order_by(Document.created_at.desc())
-        result = await db.execute(query)
-        documents = result.scalars().all()
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("documents", settings.MONGODB_URL)
+        cursor = mongo_client["chatbot"]["documents"].find({"created_by": str(current_user.id)}).sort("created_at", -1)
+        documents = []
+        async for doc_doc in cursor:
+            documents.append(Document(doc_doc))
 
         doc_list = [
             {
@@ -109,16 +119,21 @@ async def delete_document(
     Delete a training document from DB and storage.
     """
     try:
-        query = select(Document).where(Document.id == document_id).where(Document.created_by == current_user.id)
-        result = await db.execute(query)
-        doc = result.scalar_one_or_none()
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("documents", settings.MONGODB_URL)
+        doc_doc = await mongo_client["chatbot"]["documents"].find_one({
+            "_id": str(document_id),
+            "created_by": str(current_user.id)
+        })
 
-        if not doc:
+        if not doc_doc:
             return api_error_response(
                 message="Document not found.",
                 code="DOCUMENT_NOT_FOUND",
                 status_code=status.HTTP_404_NOT_FOUND,
             )
+        doc = Document(doc_doc)
 
         # Delete from disk
         if os.path.exists(doc.file_path):
@@ -128,8 +143,7 @@ async def delete_document(
                 pass
 
         # Delete from DB
-        await db.delete(doc)
-        await db.commit()
+        await mongo_client["chatbot"]["documents"].delete_many({"_id": str(document_id)})
 
         return api_success_response(data={"id": str(document_id), "deleted": True})
 

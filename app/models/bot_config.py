@@ -123,6 +123,26 @@ class BotConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         comment="Whether GDPR PII masking is enabled for exports",
     )
 
+    use_custom_mongo: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+        comment="Whether the bot uses a custom MongoDB Atlas instance for data storage",
+    )
+
+    mongo_uri: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Encrypted MongoDB connection URI",
+    )
+
+    mongo_db_name: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="MongoDB database name",
+    )
+
 
     # ------------------------------------------------------------------
     # Arbitrary extension bag — add new settings without migrations

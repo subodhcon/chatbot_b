@@ -240,14 +240,11 @@ async def update_user_details(
             
         # If updating email, check for duplicate
         if user_in.email and user_in.email != user.email:
-            existing_user = await user_repository.get_user_by_email(db, email=user_in.email)
-            if existing_user:
-                return api_error_response(
-                    message="Email already registered by another user.",
-                    code="DUPLICATE_EMAIL",
-                    status_code=status.HTTP_400_BAD_REQUEST
-                )
-            user.email = user_in.email
+            return api_error_response(
+                message="Email address cannot be changed.",
+                code="EMAIL_CHANGE_PREVENTED",
+                status_code=status.HTTP_400_BAD_REQUEST
+            )
             
         if user_in.name is not None:
             user.name = user_in.name

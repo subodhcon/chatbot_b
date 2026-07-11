@@ -59,3 +59,49 @@ def decode_token(token: str) -> dict:
     Raises jose.JWTError if the token is invalid or expired.
     """
     return jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[ALGORITHM])
+
+import os
+import base64
+import hashlib
+from cryptography.fernet import Fernet
+
+def get_encryption_key() -> bytes:
+    """
+    Get or derive a 32-byte base64 URL-safe key for Fernet encryption.
+    """
+    custom_key = os.getenv("DATABASE_ENCRYPTION_KEY")
+    if custom_key:
+        try:
+            key_bytes = base64.urlsafe_b64decode(custom_key)
+            if len(key_bytes) == 32:
+                return custom_key.encode()
+        except Exception:
+            pass
+        raw_key = custom_key.encode()
+    else:
+        raw_key = settings.JWT_SECRET_KEY.encode()
+        
+    hashed = hashlib.sha256(raw_key).digest()
+    return base64.urlsafe_b64encode(hashed)
+
+def encrypt_string(plain_text: Optional[str]) -> Optional[str]:
+    """
+    Encrypt a sensitive string.
+    """
+    if not plain_text:
+        return plain_text
+    f = Fernet(get_encryption_key())
+    return f.encrypt(plain_text.encode()).decode()
+
+def decrypt_string(encrypted_text: Optional[str]) -> Optional[str]:
+    """
+    Decrypt an encrypted string.
+    """
+    if not encrypted_text:
+        return encrypted_text
+    try:
+        f = Fernet(get_encryption_key())
+        return f.decrypt(encrypted_text.encode()).decode()
+    except Exception:
+        # Fallback to returning the raw text if decryption fails
+        return encrypted_text

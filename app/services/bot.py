@@ -59,6 +59,9 @@ class BotService:
         created_by: uuid.UUID,
         avatar_url: Optional[str] = None,
         is_active: bool = True,
+        use_custom_mongo: bool = False,
+        mongo_uri: Optional[str] = None,
+        mongo_db_name: Optional[str] = None,
     ) -> Bot:
         """
         Create a new Bot owned by `created_by`, then create its default config.
@@ -105,8 +108,15 @@ class BotService:
         bot = await bot_repository.create_bot(db, obj_in=bot_in)
 
         # Create default configuration immediately after the bot row exists
+        from app.core.security import encrypt_string
+        encrypted_uri = encrypt_string(mongo_uri) if mongo_uri else None
         await bot_config_repository.create_config(
-            db, obj_in={"bot_id": bot.id}
+            db, obj_in={
+                "bot_id": bot.id,
+                "use_custom_mongo": use_custom_mongo,
+                "mongo_uri": encrypted_uri,
+                "mongo_db_name": mongo_db_name,
+            }
         )
         logger.info(f"Default config created for bot {bot.id}")
 

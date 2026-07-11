@@ -38,6 +38,8 @@ class BotConfigResponse(BaseModel):
     fallback_message: Optional[str] = None
     tone: Optional[str] = None
     gdpr_enabled: bool
+    use_custom_mongo: bool
+    mongo_db_name: Optional[str] = None
     extra_config: Optional[dict] = None
     created_at: datetime
     updated_at: datetime
@@ -64,6 +66,19 @@ class BotCreate(BaseModel):
     is_active: bool = Field(
         True,
         description="Whether the bot is immediately active after creation",
+    )
+    use_custom_mongo: Optional[bool] = Field(
+        False,
+        description="Whether the bot uses a custom MongoDB Atlas instance",
+    )
+    mongo_uri: Optional[str] = Field(
+        None,
+        description="MongoDB connection URI",
+    )
+    mongo_db_name: Optional[str] = Field(
+        None,
+        max_length=100,
+        description="MongoDB database name",
     )
 
     @field_validator("name", mode="before")
@@ -177,6 +192,19 @@ class BotConfigUpdateRequest(BaseModel):
     extra_config: Optional[dict] = Field(
         None,
         description="Freeform JSONB configuration bag containing widget styling details",
+    )
+    use_custom_mongo: Optional[bool] = Field(
+        None,
+        description="Whether the bot uses a custom MongoDB Atlas instance",
+    )
+    mongo_uri: Optional[str] = Field(
+        None,
+        description="Encrypted MongoDB connection URI",
+    )
+    mongo_db_name: Optional[str] = Field(
+        None,
+        max_length=100,
+        description="MongoDB database name",
     )
 
     @field_validator("greeting_message", "fallback_message", "tone", mode="before")

@@ -5,8 +5,7 @@ from typing import Optional
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.conversation import Conversation
-from app.models.feedback_rating import FeedbackRating, FeedbackRatingValue
+
 
 logger = logging.getLogger("app.services.csat_calculation")
 
@@ -32,43 +31,46 @@ class CSATCalculationService:
         """
         logger.info(f"Calculating CSAT for bot {bot_id}")
 
-        # Construct time filters based on feedback submission date
-        time_filters = []
-        if start_date:
-            time_filters.append(FeedbackRating.created_at >= start_date)
-        if end_date:
-            time_filters.append(FeedbackRating.created_at <= end_date)
-
-        # 1. Count positive ratings (thumbs_up)
-        thumbs_up_query = (
-            select(func.count(FeedbackRating.id))
-            .join(Conversation, FeedbackRating.conversation_id == Conversation.id)
-            .where(
-                Conversation.bot_id == bot_id,
-                FeedbackRating.rating == FeedbackRatingValue.thumbs_up,
-                *time_filters
-            )
-        )
-        thumbs_up_res = await db.execute(thumbs_up_query)
-        positive_count = thumbs_up_res.scalar_one() or 0
-
-        # 2. Count negative ratings (thumbs_down)
-        thumbs_down_query = (
-            select(func.count(FeedbackRating.id))
-            .join(Conversation, FeedbackRating.conversation_id == Conversation.id)
-            .where(
-                Conversation.bot_id == bot_id,
-                FeedbackRating.rating == FeedbackRatingValue.thumbs_down,
-                *time_filters
-            )
-        )
-        thumbs_down_res = await db.execute(thumbs_down_query)
-        negative_count = thumbs_down_res.scalar_one() or 0
-
+        # Get bot conversations from MongoDB
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("csat", settings.MONGODB_URL)
+        if not mongo_client:
+            return 0.0
+            
+        db_name = "chatbot"
+        conv_coll = mongo_client[db_name]["conversations"]
+        rating_coll = mongo_client[db_name]["feedback_ratings"]
+        
+        # Fetch conversation IDs
+        cursor = conv_coll.find({"bot_id": str(bot_id)}, {"_id": 1})
+        conv_ids = [doc["_id"] async for doc in cursor]
+        
+        if not conv_ids:
+            return 0.0
+            
+        # Build query for ratings
+        query = {"conversation_id": {"$in": conv_ids}}
+        if start_date or end_date:
+            date_filter = {}
+            if start_date:
+                date_filter["$gte"] = start_date
+            if end_date:
+                date_filter["$lte"] = end_date
+            query["created_at"] = date_filter
+            
+        # Count positive (thumbs_up)
+        query["rating"] = "thumbs_up"
+        positive_count = await rating_coll.count_documents(query)
+        
+        # Count negative (thumbs_down)
+        query["rating"] = "thumbs_down"
+        negative_count = await rating_coll.count_documents(query)
+        
         total_ratings = positive_count + negative_count
         if total_ratings == 0:
             return 0.0
-
+            
         csat_percentage = (positive_count / total_ratings) * 100
         return round(csat_percentage, 2)
 

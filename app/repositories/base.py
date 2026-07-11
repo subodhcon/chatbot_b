@@ -22,10 +22,14 @@ class BaseRepository(Generic[ModelType]):
 
     def create(self, db: Session, *, obj_in: Dict[str, Any]) -> ModelType:
         db_obj = self.model(**obj_in)
-        db.add(db_obj)
-        db.commit()
-        db.refresh(db_obj)
-        return db_obj
+        try:
+            db.add(db_obj)
+            db.commit()
+            db.refresh(db_obj)
+            return db_obj
+        except Exception as e:
+            db.rollback()
+            raise e
 
     def update(
         self, db: Session, *, db_obj: ModelType, obj_in: Union[Dict[str, Any], Any]
@@ -38,16 +42,24 @@ class BaseRepository(Generic[ModelType]):
         for field in update_data:
             if hasattr(db_obj, field):
                 setattr(db_obj, field, update_data[field])
-        db.add(db_obj)
-        db.commit()
-        db.refresh(db_obj)
-        return db_obj
+        try:
+            db.add(db_obj)
+            db.commit()
+            db.refresh(db_obj)
+            return db_obj
+        except Exception as e:
+            db.rollback()
+            raise e
 
     def remove(self, db: Session, *, id: Any) -> Optional[ModelType]:
         obj = db.query(self.model).get(id)
         if obj:
-            db.delete(obj)
-            db.commit()
+            try:
+                db.delete(obj)
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                raise e
         return obj
 
     # --- Async Methods ---
@@ -61,10 +73,14 @@ class BaseRepository(Generic[ModelType]):
 
     async def create_async(self, db: AsyncSession, *, obj_in: Dict[str, Any]) -> ModelType:
         db_obj = self.model(**obj_in)
-        db.add(db_obj)
-        await db.commit()
-        await db.refresh(db_obj)
-        return db_obj
+        try:
+            db.add(db_obj)
+            await db.commit()
+            await db.refresh(db_obj)
+            return db_obj
+        except Exception as e:
+            await db.rollback()
+            raise e
 
     async def update_async(
         self, db: AsyncSession, *, db_obj: ModelType, obj_in: Union[Dict[str, Any], Any]
@@ -77,14 +93,22 @@ class BaseRepository(Generic[ModelType]):
         for field in update_data:
             if hasattr(db_obj, field):
                 setattr(db_obj, field, update_data[field])
-        db.add(db_obj)
-        await db.commit()
-        await db.refresh(db_obj)
-        return db_obj
+        try:
+            db.add(db_obj)
+            await db.commit()
+            await db.refresh(db_obj)
+            return db_obj
+        except Exception as e:
+            await db.rollback()
+            raise e
 
     async def remove_async(self, db: AsyncSession, *, id: Any) -> Optional[ModelType]:
         obj = await self.get_async(db, id)
         if obj:
-            await db.delete(obj)
-            await db.commit()
+            try:
+                await db.delete(obj)
+                await db.commit()
+            except Exception as e:
+                await db.rollback()
+                raise e
         return obj

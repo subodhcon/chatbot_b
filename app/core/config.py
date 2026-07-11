@@ -44,9 +44,16 @@ class Settings(BaseSettings):
     # Redis Settings
     REDIS_URL: str = "redis://localhost:6379/0"
 
+    # MongoDB Settings
+    MONGODB_URL: str = "mongodb://localhost:27017"
+
     # Security & JWT Token Secrets
     JWT_SECRET_KEY: str = "supersecretchangeinproduction"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+
+    # Rate Limiting (public widget message spam prevention)
+    RATE_LIMIT_MAX_MESSAGES: int = 10   # max messages allowed per window
+    RATE_LIMIT_WINDOW_MINUTES: int = 1  # sliding window in minutes
 
     # OpenAI API configuration placeholders
     OPENAI_API_KEY: str = ""

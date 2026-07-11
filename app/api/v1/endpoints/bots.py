@@ -2,9 +2,9 @@ import uuid
 from typing import Any
 from fastapi import APIRouter, Depends, status, Request, File, UploadFile, BackgroundTasks
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 import os
+from datetime import datetime
 from app.core.config import settings
 
 from app.db.session import get_async_db
@@ -24,9 +24,10 @@ from app.schemas.bot import (
 )
 from app.services.bot import bot_service
 from app.core.responses import api_success_response, api_error_response
-from app.services import file_upload_service
+from app.services.file_upload import file_upload_service
 from app.services.source_purge import source_purge_service
 from app.services.audit import audit_service
+from app.core.security import encrypt_string
 from app.utils.cache import get_cached_val, set_cached_val, invalidate_cache
 from app.models.knowledge_source import KnowledgeSource, KnowledgeSourceType, KnowledgeSourceStatus
 from app.models.ingestion_job import IngestionJob, IngestionJobStatus
@@ -63,12 +64,29 @@ async def create_bot(
                 status_code=status.HTTP_403_FORBIDDEN,
             )
 
+        # Test MongoDB Connection if custom mongo details provided
+        if bot_in.use_custom_mongo and bot_in.mongo_uri:
+            try:
+                from motor.motor_asyncio import AsyncIOMotorClient
+                test_client = AsyncIOMotorClient(bot_in.mongo_uri, serverSelectionTimeoutMS=3000)
+                await test_client.admin.command("ping")
+                test_client.close()
+            except Exception as conn_err:
+                return api_error_response(
+                    message=f"Failed to connect to MongoDB with the provided URI: {str(conn_err)}. Please verify your credentials and IP whitelist.",
+                    code="MONGODB_CONNECTION_FAILED",
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                )
+
         bot = await bot_service.create_bot(
             db,
             name=bot_in.name,
             created_by=current_user.id,
             avatar_url=bot_in.avatar_url,
             is_active=bot_in.is_active,
+            use_custom_mongo=bot_in.use_custom_mongo or False,
+            mongo_uri=bot_in.mongo_uri,
+            mongo_db_name=bot_in.mongo_db_name,
         )
         await audit_service.log_action(
             db,
@@ -426,6 +444,23 @@ async def update_bot_config(
         update_data = {}
         if "greeting_message" in raw:
             update_data["welcome_message"] = raw.pop("greeting_message")
+        
+        # Encrypt MongoDB URI if updated
+        if "mongo_uri" in raw and raw["mongo_uri"]:
+            test_uri = raw["mongo_uri"]
+            try:
+                from motor.motor_asyncio import AsyncIOMotorClient
+                test_client = AsyncIOMotorClient(test_uri, serverSelectionTimeoutMS=3000)
+                await test_client.admin.command("ping")
+                test_client.close()
+            except Exception as conn_err:
+                return api_error_response(
+                    message=f"Failed to connect to MongoDB with the provided URI: {str(conn_err)}. Please verify your credentials and IP whitelist.",
+                    code="MONGODB_CONNECTION_FAILED",
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                )
+            raw["mongo_uri"] = encrypt_string(raw["mongo_uri"])
+
         update_data.update(raw)  # fallback_message and tone pass through as-is
 
         updated_config, new_version = await bot_service.update_config_with_snapshot(
@@ -729,26 +764,37 @@ async def upload_bot_knowledge(
         _, ext = os.path.splitext(file.filename.lower())
         source_type = KnowledgeSourceType.pdf if ext == ".pdf" else KnowledgeSourceType.docx
 
-        # Create KnowledgeSource record
-        db_source = KnowledgeSource(
-            id=uuid.uuid4(),
-            bot_id=bot_id,
-            source_type=source_type,
-            source_name=file.filename or "document",
-            file_path=file_path,
-            file_size=file_size,
-            status=KnowledgeSourceStatus.queued,
-        )
-        db.add(db_source)
-
-        # Create IngestionJob record
-        db_job = IngestionJob(
-            id=uuid.uuid4(),
-            source_id=db_source.id,
-            status=IngestionJobStatus.queued,
-            progress=0,
-        )
-        db.add(db_job)
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("bots_endpoint", settings.MONGODB_URL)
+        mongo_db = mongo_client["chatbot"]
+        
+        source_id = str(uuid.uuid4())
+        source_doc = {
+            "_id": source_id,
+            "bot_id": str(bot_id),
+            "source_type": source_type.value if hasattr(source_type, "value") else source_type,
+            "source_name": file.filename or "document",
+            "file_path": file_path,
+            "file_size": file_size,
+            "status": "queued",
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow()
+        }
+        await mongo_db["knowledge_sources"].insert_one(source_doc)
+        db_source = KnowledgeSource(source_doc)
+        
+        job_id = str(uuid.uuid4())
+        job_doc = {
+            "_id": job_id,
+            "source_id": source_id,
+            "status": "queued",
+            "progress": 0,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow()
+        }
+        await mongo_db["ingestion_jobs"].insert_one(job_doc)
+        db_job = IngestionJob(job_doc)
 
         await audit_service.log_action(
             db,
@@ -758,10 +804,6 @@ async def upload_bot_knowledge(
             entity_id=db_source.id,
             metadata_={"bot_id": str(bot_id), "source_name": db_source.source_name, "source_type": db_source.source_type}
         )
-
-        await db.commit()
-        await db.refresh(db_source)
-        await db.refresh(db_job)
 
         # Trigger background ingestion task
         from app.tasks.ingestion import ingest_knowledge_source
@@ -830,35 +872,66 @@ async def list_bot_knowledge(
 
         from sqlalchemy import func
 
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("bots_endpoint", settings.MONGODB_URL)
+        mongo_db = mongo_client["chatbot"]
+        
         # Get total count of sources for pagination metadata
-        count_query = select(func.count()).select_from(KnowledgeSource).where(KnowledgeSource.bot_id == bot_id)
-        count_result = await db.execute(count_query)
-        total_count = count_result.scalar() or 0
+        total_count = await mongo_db["knowledge_sources"].count_documents({"bot_id": str(bot_id)})
+
+        # Compute real statistics across the entire database
+        completed_total = await mongo_db["knowledge_sources"].count_documents({"bot_id": str(bot_id), "status": "completed"})
+        processing_total = await mongo_db["knowledge_sources"].count_documents({"bot_id": str(bot_id), "status": {"$in": ["processing", "queued"]}})
+        failed_total = await mongo_db["knowledge_sources"].count_documents({"bot_id": str(bot_id), "status": "failed"})
+
+        active_crawls = []
+        if skip == 0:
+            active_crawls_cursor = mongo_db["url_crawls"].find({
+                "bot_id": str(bot_id),
+                "status": {"$in": ["pending", "crawling"]}
+            })
+            async for doc in active_crawls_cursor:
+                active_crawls.append({
+                    "id": doc["_id"],
+                    "bot_id": doc["bot_id"],
+                    "source_type": "url",
+                    "source_name": f"Crawling: {doc['start_url']}",
+                    "file_size": None,
+                    "created_at": doc["created_at"].isoformat() if isinstance(doc["created_at"], datetime) else str(doc["created_at"]),
+                    "status": doc["status"],
+                    "progress": 30 if doc["status"] == "crawling" else 10,
+                    "error_message": None
+                })
 
         # Fetch offset and limited items with their progress and error messages
-        query = (
-            select(KnowledgeSource, IngestionJob.progress, IngestionJob.error_message)
-            .outerjoin(IngestionJob, KnowledgeSource.id == IngestionJob.source_id)
-            .where(KnowledgeSource.bot_id == bot_id)
-            .order_by(KnowledgeSource.created_at.desc())
-            .offset(skip)
-            .limit(limit)
-        )
-        result = await db.execute(query)
-        rows = result.all()
-
+        cursor = mongo_db["knowledge_sources"].find({"bot_id": str(bot_id)}).sort("created_at", -1).skip(skip).limit(limit)
         sources_data = []
-        for source, progress, error_message in rows:
+        async for doc in cursor:
+            source = KnowledgeSource(doc)
+            job_doc = await mongo_db["ingestion_jobs"].find_one({"source_id": str(source.id)}, sort=[("created_at", -1)])
+            progress = job_doc.get("progress") if job_doc else None
+            error_message = job_doc.get("error_message") if job_doc else None
+            
             data = jsonable_encoder(KnowledgeSourceResponse.model_validate(source))
             data["progress"] = progress
             data["error_message"] = error_message
             sources_data.append(data)
 
+        # Prepend active crawls
+        sources_data = active_crawls + sources_data
+        total_count += len(active_crawls)
+
         return api_success_response(data={
             "total": total_count,
             "skip": skip,
             "limit": limit,
-            "items": sources_data
+            "items": sources_data,
+            "stats": {
+                "completed": completed_total,
+                "processing": processing_total + len(active_crawls),
+                "failed": failed_total
+            }
         })
 
     except ValueError:
@@ -963,10 +1036,14 @@ async def get_ingestion_job(
         job = await ingestion_service.get_job_status(db, job_id=job_id)
 
         # Verify that this job belongs to a source owned by this bot
-        source_result = await db.execute(
-            select(KnowledgeSource).where(KnowledgeSource.id == job.source_id)
-        )
-        source = source_result.scalars().first()
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("bots_endpoint", settings.MONGODB_URL)
+        source = None
+        if mongo_client:
+            source_doc = await mongo_client["chatbot"]["knowledge_sources"].find_one({"_id": str(job.source_id)})
+            if source_doc:
+                source = KnowledgeSource(source_doc)
         if not source or source.bot_id != bot_id:
             return api_error_response(
                 message="Ingestion job not found for this bot.",
@@ -1035,15 +1112,53 @@ async def start_url_crawl(
         from app.services.url_crawl import url_crawl_service
         normalized_url = url_crawl_service.normalize_url(str(crawl_in.url))
 
-        # Create UrlCrawl record
-        crawl_job = UrlCrawl(
-            id=uuid.uuid4(),
-            bot_id=bot_id,
-            start_url=normalized_url,
-            crawl_depth=crawl_in.depth,
-            status=UrlCrawlStatus.pending,
-        )
-        db.add(crawl_job)
+        # Create UrlCrawl record in MongoDB
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("bots_endpoint", settings.MONGODB_URL)
+        mongo_db = mongo_client["chatbot"]
+
+        crawl_id = str(uuid.uuid4())
+        source_id = str(uuid.uuid4())
+        job_id = str(uuid.uuid4())
+
+        # Create a KnowledgeSource placeholder for the crawl job
+        await mongo_db["knowledge_sources"].insert_one({
+            "_id": source_id,
+            "bot_id": str(bot_id),
+            "source_type": "url",
+            "source_name": f"Web Crawl: {normalized_url}",
+            "url": normalized_url,
+            "file_path": None,
+            "file_size": 0,
+            "status": "processing",
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow()
+        })
+
+        # Create an IngestionJob placeholder for tracking
+        await mongo_db["ingestion_jobs"].insert_one({
+            "_id": job_id,
+            "source_id": source_id,
+            "status": "processing",
+            "progress": 10,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow()
+        })
+
+        crawl_doc = {
+            "_id": crawl_id,
+            "bot_id": str(bot_id),
+            "start_url": normalized_url,
+            "crawl_depth": crawl_in.depth,
+            "status": UrlCrawlStatus.pending.value,
+            "source_id": source_id,
+            "job_id": job_id,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow()
+        }
+        await mongo_db["url_crawls"].insert_one(crawl_doc)
+        crawl_job = UrlCrawl(crawl_doc)
 
         await audit_service.log_action(
             db,
@@ -1059,21 +1174,20 @@ async def start_url_crawl(
         )
 
         await db.commit()
-        await db.refresh(crawl_job)
 
         # Trigger background Celery task
-        from app.tasks.ingestion import crawl_url_task
+        from app.tasks.ingestion import crawl_website
         if settings.ENVIRONMENT == "development":
-            background_tasks.add_task(crawl_url_task.run, str(crawl_job.id))
+            background_tasks.add_task(crawl_website.run, str(crawl_job.id))
         else:
             try:
-                crawl_url_task.delay(str(crawl_job.id))
+                crawl_website.delay(str(crawl_job.id))
             except Exception as celery_err:
                 import logging
                 logging.getLogger("app.api.bots").warning(
                     f"Failed to queue crawl task in Celery, falling back to FastAPI BackgroundTasks: {celery_err}"
                 )
-                background_tasks.add_task(crawl_url_task.run, str(crawl_job.id))
+                background_tasks.add_task(crawl_website.run, str(crawl_job.id))
 
         response_data = UrlCrawlResponse.model_validate(crawl_job)
         return api_success_response(
@@ -1127,13 +1241,17 @@ async def delete_bot_knowledge(
             )
 
         # Confirm the source exists and belongs to this bot before purge
-        result = await db.execute(
-            select(KnowledgeSource).where(
-                KnowledgeSource.id == source_id,
-                KnowledgeSource.bot_id == bot_id,
-            )
-        )
-        source = result.scalars().first()
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("bots_endpoint", settings.MONGODB_URL)
+        source = None
+        if mongo_client:
+            source_doc = await mongo_client["chatbot"]["knowledge_sources"].find_one({
+                "_id": str(source_id),
+                "bot_id": str(bot_id),
+            })
+            if source_doc:
+                source = KnowledgeSource(source_doc)
         if not source:
             return api_error_response(
                 message="Knowledge source not found.",
@@ -1216,14 +1334,18 @@ async def bulk_delete_bot_knowledge(
                 "total_vectors_deleted": 0,
             })
 
-        # Fetch all specified knowledge sources that belong to this bot
-        result = await db.execute(
-            select(KnowledgeSource).where(
-                KnowledgeSource.id.in_(delete_in.source_ids),
-                KnowledgeSource.bot_id == bot_id,
-            )
-        )
-        sources = result.scalars().all()
+        # Fetch all specified knowledge sources that belong to this bot from MongoDB
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("bots_endpoint", settings.MONGODB_URL)
+        sources = []
+        if mongo_client:
+            cursor = mongo_client["chatbot"]["knowledge_sources"].find({
+                "_id": {"$in": [str(sid) for sid in delete_in.source_ids]},
+                "bot_id": str(bot_id),
+            })
+            async for doc in cursor:
+                sources.append(KnowledgeSource(doc))
 
         deleted_ids = []
         total_chunks = 0

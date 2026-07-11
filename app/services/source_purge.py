@@ -2,13 +2,8 @@ import os
 import uuid
 import logging
 from typing import Any, Dict, Optional
-
-from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.models.embedding import Embedding
-from app.models.source_chunk import SourceChunk
-from app.models.knowledge_source import KnowledgeSource
+from sqlalchemy import select
 
 logger = logging.getLogger("app.services.source_purge")
 
@@ -18,15 +13,10 @@ class SourcePurgeService:
     Handles the complete, explicit teardown of a KnowledgeSource and all its
     derived data:
 
-    1.  Vectors (Embedding rows) — explicit DELETE returning row count.
-    2.  Chunks  (SourceChunk rows) — explicit DELETE returning row count.
-    3.  KnowledgeSource DB row — ORM delete inside the same transaction.
-    4.  Physical file on disk — deleted after the DB commit.
-    5.  Redis cache invalidation — SCAN-based key sweep for bot-level and
-        source-level namespaces; gracefully no-ops on MockRedisClient.
-
-    All three DB operations share one transaction. File and Redis cleanup
-    happen after commit so a DB failure never leaves orphaned state.
+    1.  Delete chunks from MongoDB.
+    2.  KnowledgeSource DB row — ORM delete inside the same transaction.
+    3.  Physical file on disk — deleted after the DB commit.
+    4.  Redis cache invalidation — SCAN-based sweep for bot-level namespaces.
     """
 
     async def purge_source(
@@ -61,54 +51,51 @@ class SourcePurgeService:
         """
         logger.info(f"[Purge] Starting purge for source_id={source_id}, bot_id={bot_id}")
 
-        # ── Step 1: Count & delete Embedding rows ────────────────────────────
-        # Subquery: chunk IDs that belong to this source
-        chunk_ids_subq = (
-            select(SourceChunk.id)
-            .where(SourceChunk.source_id == source_id)
-            .scalar_subquery()
+        # Check if custom MongoDB is used
+        from app.models.bot_config import BotConfig
+        from app.core.mongo import mongo_registry
+        
+        bot_config_res = await db.execute(
+            select(BotConfig).where(BotConfig.bot_id == bot_id)
         )
+        bot_config = bot_config_res.scalars().first()
+        
+        if bot_config and bot_config.use_custom_mongo:
+            from app.core.config import settings
+            mongo_uri = bot_config.mongo_uri or settings.MONGODB_URL
+            if mongo_uri:
+                # Delete from MongoDB using motor client
+                mongo_client = mongo_registry.get_client(str(bot_id), mongo_uri)
+                if mongo_client:
+                    db_name = bot_config.mongo_db_name or "chatbot"
+                    mongo_db = mongo_client[db_name]
+                    await mongo_db["chunks"].delete_many({"source_id": str(source_id)})
+                    logger.info(f"[Purge] Deleted chunks for source {source_id} from MongoDB")
 
-        vectors_count_result = await db.execute(
-            select(func.count()).select_from(Embedding).where(
-                Embedding.chunk_id.in_(
-                    select(SourceChunk.id).where(SourceChunk.source_id == source_id)
-                )
-            )
-        )
-        vectors_deleted = vectors_count_result.scalar() or 0
-
-        await db.execute(
-            delete(Embedding).where(Embedding.chunk_id.in_(chunk_ids_subq))
-        )
-        logger.info(f"[Purge] Deleted {vectors_deleted} embedding vector(s) for source {source_id}")
-
-        # ── Step 2: Count & delete SourceChunk rows ──────────────────────────
-        chunks_count_result = await db.execute(
-            select(func.count()).select_from(SourceChunk).where(
-                SourceChunk.source_id == source_id
-            )
-        )
-        chunks_deleted = chunks_count_result.scalar() or 0
-
-        await db.execute(
-            delete(SourceChunk).where(SourceChunk.source_id == source_id)
-        )
-        logger.info(f"[Purge] Deleted {chunks_deleted} chunk(s) for source {source_id}")
-
-        # ── Step 3: Delete the KnowledgeSource row ───────────────────────────
-        result = await db.execute(
-            select(KnowledgeSource).where(KnowledgeSource.id == source_id)
-        )
-        source = result.scalars().first()
-        if source:
-            await db.delete(source)
-            # Capture file_path from DB record if not passed explicitly
-            if file_path is None:
-                file_path = source.file_path
-
-        # ── Commit the DB transaction ─────────────────────────────────────────
-        await db.commit()
+        # Delete chunks from default MongoDB if not using custom Mongo
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+        mongo_client = mongo_registry.get_client("source_purge", settings.MONGODB_URL)
+        chunks_deleted = 0
+        vectors_deleted = 0
+        
+        if mongo_client:
+            mongo_db = mongo_client["chatbot"]
+            # Fetch source doc for file path
+            source_doc = await mongo_db["knowledge_sources"].find_one({"_id": str(source_id)})
+            if source_doc:
+                if file_path is None:
+                    file_path = source_doc.get("file_path")
+                
+                # Delete KnowledgeSource
+                await mongo_db["knowledge_sources"].delete_many({"_id": str(source_id)})
+                # Delete IngestionJobs
+                await mongo_db["ingestion_jobs"].delete_many({"source_id": str(source_id)})
+                # Delete chunks
+                if not (bot_config and bot_config.use_custom_mongo):
+                    res = await mongo_db["chunks"].delete_many({"source_id": str(source_id)})
+                    chunks_deleted = res.deleted_count
+                    vectors_deleted = res.deleted_count
         logger.info(f"[Purge] DB transaction committed for source {source_id}")
 
         # ── Step 4: Delete physical file from disk ───────────────────────────

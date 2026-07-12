@@ -13,8 +13,8 @@ class DocumentChunkingService:
     def chunk_text(
         self,
         text: str,
-        chunk_size: int = 1000,
-        overlap: int = 200,
+        chunk_size: int = 3000,
+        overlap: int = 600,
     ) -> List[Dict[str, Any]]:
         """
         Partitions input text into overlapping chunks.

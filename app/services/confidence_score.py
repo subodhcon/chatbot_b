@@ -70,6 +70,23 @@ class ConfidenceScoreService:
                 grounded_words = filtered_answer_words.intersection(context_words)
                 answer_confidence = len(grounded_words) / len(filtered_answer_words)
 
+                # Strict Numerical Verification: Penalize if answer contains numbers not present in the context
+                answer_numbers = set(re.findall(r"\b\d+\b", answer))
+                if answer_numbers:
+                    context_numbers = set()
+                    for item in retrieved_chunks:
+                        chunk_data = item.get("chunk") or item
+                        content = chunk_data.get("content") or ""
+                        context_numbers.update(re.findall(r"\b\d+\b", content))
+                    
+                    unsupported_numbers = answer_numbers - context_numbers
+                    if unsupported_numbers:
+                        # Fallback message shouldn't trigger this penalty if the fallback contains a number
+                        is_fallback_reply = fallback_message and fallback_message.strip() in answer.strip()
+                        if not is_fallback_reply:
+                            answer_confidence *= 0.1  # Heavy penalty for numeric fabrication
+                            logger.warning(f"Numerical hallucination detected! Unsupported numbers: {unsupported_numbers}. Grounding confidence penalized.")
+
         # 3. Calculate Combined Confidence Score
         # Weighting: 40% retrieval confidence, 60% answer grounding confidence
         combined_confidence = (retrieval_confidence * 0.4) + (answer_confidence * 0.6)

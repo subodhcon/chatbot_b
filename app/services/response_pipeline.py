@@ -40,7 +40,14 @@ class AIResponsePipelineService:
             content = msg.get("content", "")
             history_str += f"{role}: {content}\n"
 
-        prompt = f"""Given the following conversation history and a follow-up question, rephrase the follow-up question to be a standalone search query, in its original language, that contains all necessary context from the conversation history. Do not write anything other than the rephrased standalone query.
+        prompt = f"""You are a query rewriting assistant. Given the conversation history and a follow-up question, rewrite the follow-up question into a standalone, descriptive search query.
+
+CRITICAL INSTRUCTIONS:
+1. Pronoun Resolution: Replace pronouns (e.g., "iska", "uska", "it", "they", "this", "that", "him", "her") with the exact entity name (e.g., Hotel Name, Priest Name, Place Name) mentioned in the conversation history.
+2. Search Intent Retention: Ensure the query preserves the user's search intent (e.g., if they ask for "number", make it "contact number of [Entity]").
+3. Remove Conversational Fillers: Exclude polite phrases (e.g., "please", "thank you", "okay") or questions directed to the bot.
+4. Original Language: Write the standalone query in the original language used by the user (Hindi, English, or Hinglish).
+5. Do NOT answer the question. Only output the rewritten standalone query and nothing else.
 
 Conversation History:
 {history_str}

@@ -18,9 +18,10 @@ def test_pandas_vs_pads_prompt_rules():
     )
     
     # Assert that our distinction rule is present in the prompt
-    assert "Distinguish carefully between 'Pandits' (Panda ji/Priests/People" in system_prompt
-    assert "and 'Pads' (Pinddaan sthal/places/temples" in system_prompt
-    assert "Do NOT list places when the user asks for Panda/Priest lists" in system_prompt
+    assert "Pandit / Panda Ji / Priest" in system_prompt
+    assert "Pad" in system_prompt
+    assert "return ONLY Pandits" in system_prompt
+    assert "return ONLY Pads" in system_prompt
 
 def test_list_formatting_rules():
     """
@@ -34,8 +35,7 @@ def test_list_formatting_rules():
         fallback_message="Fallback message"
     )
     
-    assert "format them as a clean bulleted list" in system_prompt
-    assert "using Markdown '*' or '-'" in system_prompt
+    assert "always use Markdown bullets" in system_prompt
 
 def test_rag_semantic_matching_pandas():
     """

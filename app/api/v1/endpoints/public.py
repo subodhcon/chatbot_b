@@ -422,7 +422,7 @@ async def send_widget_placeholder_message(
         from app.core.mongo import mongo_registry
         mongo_client = mongo_registry.get_client("public_endpoint", settings.MONGODB_URL)
         db_name = mongo_registry.get_database_name(settings.MONGODB_URL)
-        conv_doc = await mongo_client[db_name]["conversations"].find_one({"_id": str(conversation_id)})
+        conv_doc = await mongo_client[db_name]["widget_sessions"].find_one({"_id": str(conversation_id)})
         if not conv_doc:
             return api_error_response(
                 message="Session not found.",

@@ -47,6 +47,8 @@ class MessageService:
                 if mongo_client:
                     db_name = mongo_registry.get_database_name(settings.MONGODB_URL)
                     conv_doc = await mongo_client[db_name]["conversations"].find_one({"_id": str(conversation_id)})
+                    if not conv_doc:
+                        conv_doc = await mongo_client[db_name]["widget_sessions"].find_one({"_id": str(conversation_id)})
                     if conv_doc and "bot_id" in conv_doc:
                         bot_id = uuid.UUID(conv_doc["bot_id"])
                         if redis_client and not getattr(redis_client, "is_mock", False):
@@ -66,8 +68,10 @@ class MessageService:
                 try:
                     client = mongo_registry.get_client(str(config.bot_id), mongo_uri)
                     if client:
-                        db_name = config.mongo_db_name if config.use_custom_mongo else "chatbot"
+                        db_name = config.mongo_db_name if config.use_custom_mongo else mongo_registry.get_database_name(mongo_uri)
                         conv_doc = await client[db_name]["conversations"].find_one({"_id": str(conversation_id)})
+                        if not conv_doc:
+                            conv_doc = await client[db_name]["widget_sessions"].find_one({"_id": str(conversation_id)})
                         if conv_doc:
                             bot_id = config.bot_id
                             if redis_client and not getattr(redis_client, "is_mock", False):

@@ -40,16 +40,15 @@ class MongoBaseRepository:
 
     async def get_collection(self, db: Any = None, bot_id: Any = None):
         if db and bot_id:
-            try:
-                return await self.get_collection_for_bot(db, bot_id)
-            except Exception:
-                pass
+            # This will use custom mongo if configured, or default otherwise
+            return await self.get_collection_for_bot(db, bot_id)
                 
         mongo_client = mongo_registry.get_client("repositories", settings.MONGODB_URL)
         if not mongo_client:
             raise RuntimeError("MongoDB connection not available.")
         db_name = mongo_registry.get_database_name(settings.MONGODB_URL)
         return mongo_client[db_name][self.collection_name]
+
 
     async def get_async(self, db: Any, id: Any) -> Optional[ModelType]:
         coll = await self.get_collection(db)

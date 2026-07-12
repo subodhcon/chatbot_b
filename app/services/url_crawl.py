@@ -154,6 +154,16 @@ class UrlCrawlService:
                 logger.info(f"Skipping url blocked by robots.txt: {url}")
                 continue
 
+            # Fast check: skip common non-HTML file extensions by checking the URL path
+            parsed_path = urlparse(url).path.lower()
+            if any(parsed_path.endswith(ext) for ext in [
+                ".pdf", ".zip", ".tar", ".gz", ".rar", 
+                ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp",
+                ".docx", ".xlsx", ".pptx", ".mp3", ".mp4", ".avi", ".mov"
+            ]):
+                logger.info(f"Skipping non-HTML file extension directly: {url}")
+                continue
+
             logger.info(f"Crawling URL: {url} at depth {depth}")
             try:
                 resp = httpx.get(

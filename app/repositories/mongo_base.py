@@ -27,9 +27,10 @@ class MongoBaseRepository:
         db_name = "chatbot"
         if bot_config and bot_config.use_custom_mongo:
             mongo_uri = bot_config.mongo_uri or settings.MONGODB_URL
-            db_name = bot_config.mongo_db_name or "chatbot"
+            db_name = bot_config.mongo_db_name or mongo_registry.get_database_name(mongo_uri)
         else:
             mongo_uri = settings.MONGODB_URL
+            db_name = mongo_registry.get_database_name(mongo_uri)
             
         if not mongo_uri:
             raise ValueError(f"No MongoDB connection configured for bot: {bot_id}")
@@ -47,7 +48,8 @@ class MongoBaseRepository:
         mongo_client = mongo_registry.get_client("repositories", settings.MONGODB_URL)
         if not mongo_client:
             raise RuntimeError("MongoDB connection not available.")
-        return mongo_client["chatbot"][self.collection_name]
+        db_name = mongo_registry.get_database_name(settings.MONGODB_URL)
+        return mongo_client[db_name][self.collection_name]
 
     async def get_async(self, db: Any, id: Any) -> Optional[ModelType]:
         coll = await self.get_collection(db)

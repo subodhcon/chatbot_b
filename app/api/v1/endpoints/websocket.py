@@ -131,22 +131,28 @@ async def websocket_endpoint(
         return
 
     try:
-        # Load conversation & associated bot configuration
+        # Resolve bot_id dynamically for this conversation
+        bot_id = await message_service._resolve_bot_id_for_conversation(db, conv_uuid)
+        if not bot_id:
+            logger.error(f"Conversation session not found for WebSocket: {conversation_id}")
+            await websocket.close(code=4004)
+            return
+
+        # Load bot & associated configuration from SQL database using bot_id
         query = (
-            select(Conversation, BotConfig)
-            .join(Bot, Conversation.bot_id == Bot.id)
+            select(Bot, BotConfig)
             .join(BotConfig, Bot.id == BotConfig.bot_id)
-            .where(Conversation.id == conv_uuid)
+            .where(Bot.id == bot_id)
         )
         result = await db.execute(query)
         row = result.first()
 
         if not row:
-            logger.error(f"Conversation session or configuration not found for WebSocket: {conversation_id}")
+            logger.error(f"Bot or configuration not found for WebSocket: {bot_id}")
             await websocket.close(code=4004)
             return
 
-        conv, config = row
+        bot, config = row
 
         # Resolve all bot config parameters once (safe defaults applied)
         cfg = bot_config_resolver.resolve(config)
@@ -204,7 +210,7 @@ async def websocket_endpoint(
                 # 4. Stream response from response pipeline
                 async for chunk in ai_response_pipeline_service.generate_response_stream(
                     db=db,
-                    bot_id=conv.bot_id,
+                    bot_id=bot_id,
                     user_question=content,
                     chat_history=history_payload[:-1] if len(history_payload) > 1 else [],
                     system_prompt=cfg.system_prompt,

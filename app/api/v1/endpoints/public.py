@@ -150,12 +150,12 @@ async def initialize_public_conversation(
         from app.core.mongo import mongo_registry
         
         mongo_uri = None
-        db_name = "chatbot"
         if config and config.use_custom_mongo:
             mongo_uri = config.mongo_uri
-            db_name = config.mongo_db_name or "chatbot"
+            db_name = config.mongo_db_name or mongo_registry.get_database_name(mongo_uri)
         else:
             mongo_uri = settings.MONGODB_URL
+            db_name = mongo_registry.get_database_name(mongo_uri)
             
         if not mongo_uri:
             raise ValueError("No MongoDB URL is configured for this bot.")
@@ -253,12 +253,12 @@ async def send_public_message(
         from app.core.config import settings
         from app.core.mongo import mongo_registry
         mongo_uri = None
-        db_name = "chatbot"
         if config and config.use_custom_mongo:
             mongo_uri = config.mongo_uri
-            db_name = config.mongo_db_name or "chatbot"
+            db_name = config.mongo_db_name or mongo_registry.get_database_name(mongo_uri)
         else:
             mongo_uri = settings.MONGODB_URL
+            db_name = mongo_registry.get_database_name(mongo_uri)
             
         if not mongo_uri:
             raise ValueError("No MongoDB URL is configured for this bot.")
@@ -297,7 +297,7 @@ async def send_public_message(
         )
 
         # Update conversation timestamp in MongoDB
-        await mongo_client["chatbot"]["conversations"].update_one(
+        await mongo_client[db_name]["conversations"].update_one(
             {"_id": str(conversation_id)},
             {"$set": {"updated_at": datetime.utcnow()}}
         )
@@ -421,7 +421,8 @@ async def send_widget_placeholder_message(
         from app.core.config import settings
         from app.core.mongo import mongo_registry
         mongo_client = mongo_registry.get_client("public_endpoint", settings.MONGODB_URL)
-        conv_doc = await mongo_client["chatbot"]["conversations"].find_one({"_id": str(conversation_id)})
+        db_name = mongo_registry.get_database_name(settings.MONGODB_URL)
+        conv_doc = await mongo_client[db_name]["conversations"].find_one({"_id": str(conversation_id)})
         if not conv_doc:
             return api_error_response(
                 message="Session not found.",
@@ -631,9 +632,10 @@ async def submit_message_feedback(
         from app.core.config import settings
         from app.core.mongo import mongo_registry
         mongo_client = mongo_registry.get_client("public", settings.MONGODB_URL)
+        db_name = mongo_registry.get_database_name(settings.MONGODB_URL)
         conv_doc = None
         if mongo_client:
-            conv_doc = await mongo_client["chatbot"]["conversations"].find_one({"_id": str(payload.conversation_id)})
+            conv_doc = await mongo_client[db_name]["conversations"].find_one({"_id": str(payload.conversation_id)})
         if not conv_doc:
             return api_error_response(
                 message="Message or Conversation not found.",
@@ -642,12 +644,11 @@ async def submit_message_feedback(
             )
         conv = Conversation(conv_doc)
             
-        from app.core.config import settings
-        from app.core.mongo import mongo_registry
         mongo_client = mongo_registry.get_client("public", settings.MONGODB_URL)
+        db_name = mongo_registry.get_database_name(settings.MONGODB_URL)
         msg_found = False
         if mongo_client:
-            messages_coll = mongo_client["chatbot"]["messages"]
+            messages_coll = mongo_client[db_name]["messages"]
             doc = await messages_coll.find_one({"_id": str(payload.message_id), "conversation_id": str(payload.conversation_id)})
             if doc:
                 msg_found = True

@@ -13,6 +13,29 @@ class MongoConnectionRegistry:
     def __init__(self):
         self._clients: Dict[str, AsyncIOMotorClient] = {}
 
+    def get_database_name(self, encrypted_uri: str, default: str = "chatbot") -> str:
+        """
+        Dynamically extract database name from MongoDB connection URI.
+        """
+        if not encrypted_uri:
+            return default
+        try:
+            if encrypted_uri.startswith("mongodb://") or encrypted_uri.startswith("mongodb+srv://"):
+                connection_string = encrypted_uri
+            else:
+                connection_string = decrypt_string(encrypted_uri)
+                if not connection_string:
+                    return default
+            from urllib.parse import urlparse
+            parsed = urlparse(connection_string)
+            db_name = parsed.path.strip("/")
+            if "?" in db_name:
+                db_name = db_name.split("?")[0]
+            return db_name if db_name else default
+        except Exception as e:
+            logger.warning(f"Error parsing database name from MongoDB URI: {e}")
+            return default
+
     def get_client(self, bot_id: str, encrypted_uri: str) -> Optional[AsyncIOMotorClient]:
         """
         Get or create a MongoClient instance for a specific bot.

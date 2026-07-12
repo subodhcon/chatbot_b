@@ -18,8 +18,15 @@ class MongoBaseRepository:
         from app.models.bot_config import BotConfig
         from sqlalchemy import select
         
+        db_bot_id = bot_id
+        if isinstance(db_bot_id, str):
+            try:
+                db_bot_id = uuid.UUID(db_bot_id)
+            except ValueError:
+                pass
+                
         bot_config_res = await db.execute(
-            select(BotConfig).where(BotConfig.bot_id == str(bot_id))
+            select(BotConfig).where(BotConfig.bot_id == db_bot_id)
         )
         bot_config = bot_config_res.scalars().first()
         

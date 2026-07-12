@@ -133,6 +133,7 @@ class VectorSearchService:
                             sources_map[str(s.id)] = s
                         
                         if not sources_map:
+                            logger.info("Local similarity: No knowledge sources found for this bot.")
                             return []
                         
                         source_ids = list(sources_map.keys())
@@ -144,6 +145,7 @@ class VectorSearchService:
                             all_chunks.append(ch)
                         
                         if not all_chunks:
+                            logger.info("Local similarity: No chunks found in database.")
                             return []
                         
                         # 3. Calculate cosine similarity in Python
@@ -164,11 +166,16 @@ class VectorSearchService:
                             if not emb:
                                 continue
                             score = cosine_similarity(query_vector, emb)
-                            if score >= min_score:
-                                scored_chunks.append((score, ch))
+                            scored_chunks.append((score, ch))
                         
                         scored_chunks.sort(key=lambda x: x[0], reverse=True)
-                        top_chunks = scored_chunks[:top_k]
+                        
+                        # Auto-adjust threshold: if no chunks pass the min_score, take the top match anyway
+                        effective_min_score = min_score
+                        if scored_chunks and scored_chunks[0][0] < min_score:
+                            effective_min_score = scored_chunks[0][0] * 0.9 # loosen up to allow top matches
+                            
+                        top_chunks = [x for x in scored_chunks if x[0] >= effective_min_score][:top_k]
                         
                         search_results = []
                         for score, doc in top_chunks:
@@ -191,7 +198,8 @@ class VectorSearchService:
                         return search_results
                     except Exception as fallback_err:
                         logger.error(f"Fallback local search also failed: {fallback_err}")
-                        return [] # Fallback gracefully with empty chunks so LLM can still answer generically
+                        return []
+
 
         return []
 

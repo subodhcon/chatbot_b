@@ -696,17 +696,15 @@ async def upload_avatar(
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Generate unique filename
-        filename = f"{uuid.uuid4()}{ext}"
-        file_path = os.path.join(settings.UPLOAD_DIR, filename)
-
-        # Write to disk
-        with open(file_path, "wb") as f:
-            f.write(contents)
-
-        # Construct full URL
-        avatar_url = f"{request.base_url}uploads/{filename}"
-
+        # Convert contents to Base64 Data URL
+        import base64
+        mime_type = "image/png"
+        if ext in [".jpg", ".jpeg"]:
+            mime_type = "image/jpeg"
+            
+        base64_data = base64.b64encode(contents).decode("utf-8")
+        avatar_url = f"data:{mime_type};base64,{base64_data}"
+        
         return api_success_response(data={"avatar_url": avatar_url})
 
     except Exception as e:

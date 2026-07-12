@@ -19,7 +19,7 @@ logger = logging.getLogger("app.request")
 
 async def listen_to_ingestion_updates():
     """
-    Subscribes to Redis 'ingestion_updates' channel and broadcasts updates to WebSocket clients.
+    Subscribes to Redis 'ingestion_updates' channel and broadcasts updates to WebSocket clients with auto-reconnection logic.
     """
     import asyncio
     import json
@@ -27,42 +27,62 @@ async def listen_to_ingestion_updates():
     from app.core.websocket import manager
 
     logging.info("Starting Redis pubsub listener for ingestion updates...")
-    redis_generator = get_redis()
-    try:
-        redis_client = await redis_generator.__anext__()
-    except StopAsyncIteration:
-        logging.error("Failed to get Redis client from generator.")
-        return
+    
+    while True:
+        redis_generator = get_redis()
+        try:
+            redis_client = await redis_generator.__anext__()
+        except StopAsyncIteration:
+            logging.error("Failed to get Redis client from generator. Retrying in 5 seconds...")
+            await asyncio.sleep(5)
+            continue
+        except Exception as e:
+            logging.error(f"Failed to fetch Redis client: {e}. Retrying in 5 seconds...")
+            await asyncio.sleep(5)
+            continue
 
-    if getattr(redis_client, "is_mock", False):
-        logging.info("Redis is mocked. Skipping real-time worker pubsub listener.")
-        return
+        if getattr(redis_client, "is_mock", False):
+            logging.info("Redis is mocked. Skipping real-time worker pubsub listener.")
+            return
 
-    try:
-        pubsub = redis_client.pubsub()
-        await pubsub.subscribe("ingestion_updates")
-        logging.info("Subscribed to Redis channel 'ingestion_updates'")
+        pubsub = None
+        try:
+            pubsub = redis_client.pubsub()
+            await pubsub.subscribe("ingestion_updates")
+            logging.info("Subscribed to Redis channel 'ingestion_updates'")
 
-        while True:
-            try:
-                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-                if message and message.get("type") == "message":
-                    data_str = message.get("data")
-                    if data_str:
-                        data = json.loads(data_str)
-                        bot_id = data.get("bot_id")
-                        if bot_id:
-                            await manager.broadcast_json_to_session(f"ingestion:{bot_id}", data)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logging.error(f"Error in pubsub message loop: {e}")
-                await asyncio.sleep(1)
-
-        await pubsub.unsubscribe("ingestion_updates")
-        await pubsub.close()
-    except Exception as e:
-        logging.error(f"Failed to initialize Redis Pub/Sub: {e}")
+            while True:
+                try:
+                    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    if message and message.get("type") == "message":
+                        data_str = message.get("data")
+                        if data_str:
+                            data = json.loads(data_str)
+                            bot_id = data.get("bot_id")
+                            if bot_id:
+                                await manager.broadcast_json_to_session(f"ingestion:{bot_id}", data)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as loop_err:
+                    logging.error(f"Error in pubsub message loop: {loop_err}. Reconnecting...")
+                    raise
+        except asyncio.CancelledError:
+            logging.info("Redis pubsub listener task cancelled.")
+            if pubsub:
+                try:
+                    await pubsub.unsubscribe("ingestion_updates")
+                    await pubsub.close()
+                except Exception:
+                    pass
+            break
+        except Exception as conn_err:
+            logging.error(f"Redis Pub/Sub connection lost or failed: {conn_err}. Re-establishing in 5 seconds...")
+            if pubsub:
+                try:
+                    await pubsub.close()
+                except Exception:
+                    pass
+            await asyncio.sleep(5)
 
 
 @asynccontextmanager

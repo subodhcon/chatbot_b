@@ -21,10 +21,14 @@ class RateLimiterService:
     """
 
     async def _get_collection(self, settings, mongo_registry):
+        if not settings.MONGODB_URL or "localhost" in settings.MONGODB_URL:
+            # Skip localhost or unconfigured database to prevent 5-second connection timeout
+            return None
         client = mongo_registry.get_client("rate_limiter", settings.MONGODB_URL)
         if client is None:
             return None
         return client["chatbot"]["rate_limit_logs"]
+
 
     async def check_and_record(
         self,

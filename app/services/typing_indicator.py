@@ -21,10 +21,15 @@ class TypingIndicatorService:
     """
     Manages ephemeral typing state for public widget conversations.
     """
+    def __init__(self):
+        self._local_states = {}
 
     async def _get_collection(self):
         from app.core.config import settings
         from app.core.mongo import mongo_registry
+        if not settings.MONGODB_URL or "localhost" in settings.MONGODB_URL:
+            # Skip localhost to prevent timeout and run in in-memory mode
+            return None
         client = mongo_registry.get_client("typing_indicator", settings.MONGODB_URL)
         if client is None:
             return None
@@ -36,8 +41,16 @@ class TypingIndicatorService:
         """
         coll = await self._get_collection()
         if coll is None:
-            logger.warning("TypingIndicator: MongoDB unavailable — skipping set_typing.")
+            # Fallback to in-memory storage
+            now = datetime.now(timezone.utc)
+            self._local_states[conversation_id] = {
+                "bot_id": bot_id,
+                "is_typing": True,
+                "expires_at": now + timedelta(seconds=TYPING_TTL_SECONDS)
+            }
+            logger.info("TypingIndicator: set is_typing=True (In-Memory mode)")
             return
+
 
         now = datetime.now(timezone.utc)
         expires_at = now + timedelta(seconds=TYPING_TTL_SECONDS)
@@ -61,6 +74,9 @@ class TypingIndicatorService:
         """
         coll = await self._get_collection()
         if coll is None:
+            # Fallback to in-memory storage
+            self._local_states.pop(conversation_id, None)
+            logger.info("TypingIndicator: cleared typing (In-Memory mode)")
             return
 
         await coll.delete_many({"_id": conversation_id})
@@ -73,19 +89,16 @@ class TypingIndicatorService:
         """
         coll = await self._get_collection()
         if coll is None:
-            return {"is_typing": False, "started_at": None}
+            # Fallback to in-memory check
+            state = self._local_states.get(conversation_id)
+            if not state:
+                return {"is_typing": False, "started_at": None}
+            now = datetime.now(timezone.utc)
+            if now > state["expires_at"]:
+                self._local_states.pop(conversation_id, None)
+                return {"is_typing": False, "started_at": None}
+            return {"is_typing": True, "started_at": None}
 
-        doc = await coll.find_one({"_id": conversation_id})
-        if not doc:
-            return {"is_typing": False, "started_at": None}
-
-        # Check if still within TTL (double safety check)
-        now = datetime.now(timezone.utc)
-        expires_at = doc.get("expires_at")
-        if expires_at and now > expires_at.replace(tzinfo=timezone.utc) if expires_at.tzinfo is None else expires_at:
-            # Stale — clean up
-            await coll.delete_many({"_id": conversation_id})
-            return {"is_typing": False, "started_at": None}
 
         started_at = doc.get("started_at")
         return {

@@ -563,22 +563,81 @@ async def get_widget_conversation_history(
 ):
     """
     Fetch details of a widget conversation session along with its paginated message history.
+    Scans all bot MongoDB configurations in parallel to find the session.
     """
+    import asyncio
+    from sqlalchemy import select
+    from app.models.bot_config import BotConfig
+    from app.core.mongo import mongo_registry
+    from app.core.config import settings
+
     try:
-        conv = await conversation_service.get_conversation(db, conversation_id=conversation_id)
-        if not conv:
+        # --- Step 1: Find the widget session by scanning all bot MongoDB configs in parallel ---
+        conv_doc = None
+        found_bot_id = None
+        found_client = None
+        found_db_name = None
+
+        async def search_in_mongo(bot_id_str, mongo_uri, db_name_str):
+            """Search for conversation_id in a specific MongoDB."""
+            try:
+                client = mongo_registry.get_client(bot_id_str, mongo_uri)
+                if not client:
+                    return None, None, None, None
+                doc = await asyncio.wait_for(
+                    client[db_name_str]["widget_sessions"].find_one({"_id": str(conversation_id)}),
+                    timeout=3.0
+                )
+                if doc:
+                    return doc, bot_id_str, client, db_name_str
+            except Exception:
+                pass
+            return None, None, None, None
+
+        # Build search tasks for all bot configs
+        bot_configs_res = await db.execute(select(BotConfig))
+        bot_configs = bot_configs_res.scalars().all()
+
+        tasks = []
+        for config in bot_configs:
+            if config.use_custom_mongo and config.mongo_uri:
+                mongo_uri = config.mongo_uri
+                db_name_str = config.mongo_db_name or mongo_registry.get_database_name(mongo_uri)
+            elif settings.MONGODB_URL and "localhost" not in settings.MONGODB_URL:
+                mongo_uri = settings.MONGODB_URL
+                db_name_str = mongo_registry.get_database_name(settings.MONGODB_URL)
+            else:
+                continue
+            tasks.append(search_in_mongo(str(config.bot_id), mongo_uri, db_name_str))
+
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, tuple) and result[0] is not None:
+                    conv_doc, found_bot_id, found_client, found_db_name = result
+                    break
+
+        if not conv_doc:
             return api_error_response(
                 message="Conversation session not found.",
                 code="CONVERSATION_NOT_FOUND",
                 status_code=status.HTTP_404_NOT_FOUND,
             )
 
-        messages = await message_service.fetch_conversation_history(
-            db,
-            conversation_id=conversation_id,
-            skip=skip,
-            limit=limit,
-        )
+        from app.models.widget_session import WidgetSession
+        conv = WidgetSession(conv_doc)
+
+        # --- Step 2: Fetch messages from the same MongoDB ---
+        messages = []
+        try:
+            msg_cursor = found_client[found_db_name]["messages"].find(
+                {"conversation_id": str(conversation_id)}
+            ).sort("created_at", 1).skip(skip).limit(limit)
+            async for doc in msg_cursor:
+                from app.services.message import MongoMessageWrapper
+                messages.append(MongoMessageWrapper(doc))
+        except Exception as msg_err:
+            logger.warning(f"Failed to fetch messages for conversation {conversation_id}: {msg_err}")
 
         response_data = {
             "conversation": {
@@ -609,6 +668,8 @@ async def get_widget_conversation_history(
             details=str(e),
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
+
+
 
 
 class FeedbackSubmitRequest(BaseModel):

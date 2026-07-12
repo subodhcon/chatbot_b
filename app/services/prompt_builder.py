@@ -145,7 +145,7 @@ If the user asks for Pads,
 return ONLY Pads.
 
 If the user asks for Hotels,
-return ONLY Hotels.
+return ONLY actual Hotels (entities explicitly named as "Hotel [Name]" or "Guest House"). Do NOT list schools, colleges, pandas' houses, or temporary shelters as hotels, even if they are described as accommodation facilities in the retrieved context.
 
 --------------------------
 6. NO HALLUCINATION

@@ -256,15 +256,34 @@ async def send_public_message(
         if config and config.use_custom_mongo:
             mongo_uri = config.mongo_uri
             db_name = config.mongo_db_name or mongo_registry.get_database_name(mongo_uri)
-        else:
+        elif settings.MONGODB_URL and "localhost" not in settings.MONGODB_URL:
             mongo_uri = settings.MONGODB_URL
             db_name = mongo_registry.get_database_name(mongo_uri)
             
-        if not mongo_uri:
-            raise ValueError("No MongoDB URL is configured for this bot.")
-            
-        mongo_client = mongo_registry.get_client(str(bot_id), mongo_uri)
-        conv_doc = await mongo_client[db_name]["conversations"].find_one({"_id": str(conversation_id)})
+        if mongo_uri:
+            mongo_client = mongo_registry.get_client(str(bot_id), mongo_uri)
+            conv_doc = await mongo_client[db_name]["widget_sessions"].find_one({"_id": str(conversation_id)})
+            if not conv_doc:
+                conv_doc = await mongo_client[db_name]["conversations"].find_one({"_id": str(conversation_id)})
+        else:
+            # Fallback to parallel lookup if database configuration couldn't be loaded directly
+            conv_doc = None
+            for cfg in [config]:
+                if not cfg: continue
+                # We already have config, try to query its DB
+                uri = cfg.mongo_uri if cfg.use_custom_mongo else settings.MONGODB_URL
+                if uri and "localhost" not in uri:
+                    client = mongo_registry.get_client(str(cfg.bot_id), uri)
+                    if client:
+                        dname = cfg.mongo_db_name if cfg.use_custom_mongo else mongo_registry.get_database_name(uri)
+                        conv_doc = await client[dname]["widget_sessions"].find_one({"_id": str(conversation_id)})
+                        if not conv_doc:
+                            conv_doc = await client[dname]["conversations"].find_one({"_id": str(conversation_id)})
+                        if conv_doc:
+                            mongo_client = client
+                            db_name = dname
+                            break
+
         if not conv_doc:
             return api_error_response(
                 message="Session not found.",
@@ -272,6 +291,7 @@ async def send_public_message(
                 status_code=status.HTTP_404_NOT_FOUND,
             )
         conv = Conversation(conv_doc)
+
 
         # --- Rate Limit Check ---
         ip_address = ""
@@ -417,19 +437,15 @@ async def send_widget_placeholder_message(
     Saves user message, creates a placeholder bot reply using the service layer, and stores both in DB.
     """
     try:
-        # Load conversation from MongoDB & associated bot configuration
-        from app.core.config import settings
-        from app.core.mongo import mongo_registry
-        mongo_client = mongo_registry.get_client("public_endpoint", settings.MONGODB_URL)
-        db_name = mongo_registry.get_database_name(settings.MONGODB_URL)
-        conv_doc = await mongo_client[db_name]["widget_sessions"].find_one({"_id": str(conversation_id)})
-        if not conv_doc:
+        # Load conversation from MongoDB using service layers
+        conv = await conversation_service.get_conversation(db, conversation_id=conversation_id)
+        if not conv:
             return api_error_response(
                 message="Session not found.",
                 code="SESSION_NOT_FOUND",
                 status_code=status.HTTP_404_NOT_FOUND,
             )
-        conv = Conversation(conv_doc)
+
 
         config_res = await db.execute(
             select(BotConfig).where(BotConfig.bot_id == conv.bot_id)

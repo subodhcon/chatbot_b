@@ -1,6 +1,6 @@
 import uuid
 import logging
-from typing import List
+from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger("app.services.message")

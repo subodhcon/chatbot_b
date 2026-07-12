@@ -60,6 +60,7 @@ class ConversationService:
         db: AsyncSession,
         *,
         visitor_session_id: str,
+        bot_id: Optional[uuid.UUID] = None,
     ) -> Optional[WidgetSession]:
         """
         Get the current active conversation for a given visitor session.
@@ -68,6 +69,7 @@ class ConversationService:
         return await conversation_repository.get_active_conversation(
             db,
             visitor_session_id=visitor_session_id,
+            bot_id=bot_id,
         )
 
     async def close_conversation(
@@ -113,6 +115,7 @@ class ConversationService:
         active_conversation = await self.get_active_conversation(
             db,
             visitor_session_id=visitor_session_id,
+            bot_id=bot_id,
         )
         if active_conversation is not None:
             logger.info(f"Found active conversation: {active_conversation.id}")

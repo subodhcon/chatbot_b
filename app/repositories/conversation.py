@@ -38,17 +38,24 @@ class ConversationRepository(MongoBaseRepository):
         """
         Retrieve a conversation session by its ID.
         """
-        return await self.get_async(db, conversation_id)
+        from app.services.message import message_service
+        bot_id = await message_service._resolve_bot_id_for_conversation(db, conversation_id)
+        if not bot_id:
+            return await self.get_async(db, conversation_id)
+        coll = await self.get_collection(db, bot_id)
+        doc = await coll.find_one({"_id": str(conversation_id)})
+        return WidgetSession(doc) if doc else None
 
     async def get_active_conversation(
         self,
         db,
         visitor_session_id: str,
+        bot_id: Optional[uuid.UUID] = None,
     ) -> Optional[WidgetSession]:
         """
         Retrieve the active conversation session for a given visitor session ID.
         """
-        coll = await self.get_collection()
+        coll = await self.get_collection(db, bot_id)
         doc = await coll.find_one({
             "visitor_session_id": visitor_session_id,
             "status": WidgetSessionStatus.active.value,

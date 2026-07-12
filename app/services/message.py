@@ -27,7 +27,7 @@ class MessageService:
         from app.core.mongo import mongo_registry
         from app.core.config import settings
         
-        # 1. Try Redis first
+        # 1. Try Redis cache first (fastest)
         redis_client = None
         try:
             redis_gen = get_redis()
@@ -40,38 +40,29 @@ class MessageService:
         except Exception as re_err:
             logger.warning(f"Redis lookup failed in resolve_bot_id: {re_err}")
 
-        # 2. Try main Mongo lookup if configured
-        if settings.MONGODB_URL and "localhost" not in settings.MONGODB_URL:
-            try:
-                mongo_client = mongo_registry.get_client("resolve_bot", settings.MONGODB_URL)
-                if mongo_client:
-                    db_name = mongo_registry.get_database_name(settings.MONGODB_URL)
-                    conv_doc = await mongo_client[db_name]["conversations"].find_one({"_id": str(conversation_id)})
-                    if not conv_doc:
-                        conv_doc = await mongo_client[db_name]["widget_sessions"].find_one({"_id": str(conversation_id)})
-                    if conv_doc and "bot_id" in conv_doc:
-                        bot_id = uuid.UUID(conv_doc["bot_id"])
-                        if redis_client and not getattr(redis_client, "is_mock", False):
-                            await redis_client.set(f"cache:conv_bot:{conversation_id}", str(bot_id), ex=86400)
-                        return bot_id
-            except Exception as mongo_err:
-                logger.warning(f"Main Mongo lookup failed in resolve_bot_id: {mongo_err}")
-
-        # 3. Multi-tenant scan: check each bot's custom MongoDB config
+        # 2. Multi-tenant scan: check each bot's configured MongoDB (custom or default)
+        # This handles both custom MongoDB bots and default MongoDB bots correctly
         try:
             bot_configs_res = await db.execute(select(BotConfig))
             bot_configs = bot_configs_res.scalars().all()
             for config in bot_configs:
-                mongo_uri = config.mongo_uri if config.use_custom_mongo else settings.MONGODB_URL
-                if not mongo_uri or (not config.use_custom_mongo and "localhost" in mongo_uri):
-                    continue
+                # Determine which MongoDB URI to use for this bot
+                if config.use_custom_mongo and config.mongo_uri:
+                    mongo_uri = config.mongo_uri
+                    db_name = config.mongo_db_name or mongo_registry.get_database_name(mongo_uri)
+                elif settings.MONGODB_URL and "localhost" not in settings.MONGODB_URL:
+                    mongo_uri = settings.MONGODB_URL
+                    db_name = mongo_registry.get_database_name(mongo_uri)
+                else:
+                    continue  # Skip localhost/unconfigured bots
+                    
                 try:
                     client = mongo_registry.get_client(str(config.bot_id), mongo_uri)
                     if client:
-                        db_name = config.mongo_db_name if config.use_custom_mongo else mongo_registry.get_database_name(mongo_uri)
-                        conv_doc = await client[db_name]["conversations"].find_one({"_id": str(conversation_id)})
+                        # Check both collections: widget_sessions and conversations
+                        conv_doc = await client[db_name]["widget_sessions"].find_one({"_id": str(conversation_id)})
                         if not conv_doc:
-                            conv_doc = await client[db_name]["widget_sessions"].find_one({"_id": str(conversation_id)})
+                            conv_doc = await client[db_name]["conversations"].find_one({"_id": str(conversation_id)})
                         if conv_doc:
                             bot_id = config.bot_id
                             if redis_client and not getattr(redis_client, "is_mock", False):
@@ -83,6 +74,7 @@ class MessageService:
             logger.error(f"Error during bot configs scan in resolve_bot_id: {scan_err}")
 
         return None
+
 
     async def _get_mongo_collection(self, db: AsyncSession, conversation_id: uuid.UUID):
         from app.models.bot_config import BotConfig

@@ -194,7 +194,6 @@ async def websocket_endpoint(
             )
 
             # Load historical logs for context (includes the message we just saved)
-            from app.services.message import message_service
             msg_rows = await message_service.fetch_conversation_history(db, conversation_id=conv_uuid)
 
             history_payload = [

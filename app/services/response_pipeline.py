@@ -40,14 +40,8 @@ class AIResponsePipelineService:
             content = msg.get("content", "")
             history_str += f"{role}: {content}\n"
 
-        prompt = f"""You are a query rewriting assistant. Given the conversation history and a follow-up question, rewrite the follow-up question into a standalone, descriptive search query.
-
-CRITICAL INSTRUCTIONS:
-1. Pronoun Resolution: Replace pronouns (e.g., "iska", "uska", "it", "they", "this", "that", "him", "her") with the exact entity name (e.g., Hotel Name, Priest Name, Place Name) mentioned in the conversation history.
-2. Search Intent Retention: Ensure the query preserves the user's search intent (e.g., if they ask for "number", make it "contact number of [Entity]").
-3. Remove Conversational Fillers: Exclude polite phrases (e.g., "please", "thank you", "okay") or questions directed to the bot.
-4. Original Language: Write the standalone query in the original language used by the user (Hindi, English, or Hinglish).
-5. Do NOT answer the question. Only output the rewritten standalone query and nothing else.
+        prompt = f"""Given the following conversation history and a follow-up question, rewrite the follow-up question into a standalone, search-friendly query.
+If the follow-up question is already standalone, is a new topic, or does not refer to the previous history (e.g. greetings like "hi", or a completely new query like "hills"), output it EXACTLY as the user wrote it. Do not change, translate, or expand it.
 
 Conversation History:
 {history_str}
@@ -57,14 +51,14 @@ Standalone Query:"""
 
         try:
             res = await openai_chat_service.generate_response(
-                system_prompt="You are a query rewriting assistant. Rewrite the user's follow-up question into a standalone, descriptive search query.",
+                system_prompt="You are a query rewriting assistant. Rewrite the follow-up question into a standalone query, or return it as-is if it is already standalone.",
                 user_prompt=prompt,
                 chat_history=None,
                 model_name=model_name,
                 temperature=0.0,
                 max_tokens=64,
             )
-            condensed = res.get("answer", "").strip()
+            condensed = res.get("answer", "").strip().replace('"', '').replace("'", "")
             if condensed:
                 logger.info(f"[Condensation] Rewrote '{user_question}' -> '{condensed}'")
                 return condensed

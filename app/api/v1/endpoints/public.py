@@ -604,6 +604,11 @@ async def get_widget_conversation_history(
                     client[db_name_str]["widget_sessions"].find_one({"_id": str(conversation_id)}),
                     timeout=3.0
                 )
+                if not doc:
+                    doc = await asyncio.wait_for(
+                        client[db_name_str]["conversations"].find_one({"_id": str(conversation_id)}),
+                        timeout=3.0
+                    )
                 if doc:
                     return doc, bot_id_str, client, db_name_str
             except Exception:

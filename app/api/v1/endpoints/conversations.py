@@ -9,6 +9,7 @@ from app.dependencies import get_current_user
 from app.models.user import User
 from app.models.conversation import Conversation
 from app.models.bot import Bot
+from app.models.bot_config import BotConfig
 from app.schemas.conversation import ConversationResponse, MessageResponse
 from app.core.responses import api_success_response, api_error_response
 
@@ -28,7 +29,11 @@ async def list_conversations(
     """
     try:
         # User can only view conversations of bots owned by them
-        bots_query = select(Bot).where(Bot.created_by == current_user.id)
+        bots_query = (
+            select(Bot, BotConfig)
+            .join(BotConfig, Bot.id == BotConfig.bot_id)
+            .where(Bot.created_by == current_user.id)
+        )
         if bot_id:
             try:
                 bot_uuid = uuid.UUID(bot_id)
@@ -41,37 +46,73 @@ async def list_conversations(
                 )
         
         bots_res = await db.execute(bots_query)
-        bots = bots_res.scalars().all()
-        bot_ids = [str(b.id) for b in bots]
-        bot_name_map = {str(b.id): b.name for b in bots}
+        bots_rows = bots_res.all()
+        bot_name_map = {str(r.Bot.id): r.Bot.name for r in bots_rows}
 
-        from app.core.config import settings
-        from app.core.mongo import mongo_registry
-        mongo_client = mongo_registry.get_client("conversations", settings.MONGODB_URL)
-        if not mongo_client:
-            return api_success_response(data=[])
+        import asyncio
+        from datetime import datetime
 
-        db_name = "chatbot"
-        conv_coll = mongo_client[db_name]["conversations"]
-        msg_coll = mongo_client[db_name]["messages"]
+        async def fetch_bot_conversations(bot, config):
+            from app.core.config import settings
+            from app.core.mongo import mongo_registry
+            
+            mongo_uri = None
+            db_name = "chatbot"
+            if config and config.use_custom_mongo and config.mongo_uri:
+                mongo_uri = config.mongo_uri
+                db_name = config.mongo_db_name or "chatbot"
+            else:
+                mongo_uri = settings.MONGODB_URL
+                db_name = mongo_registry.get_database_name(settings.MONGODB_URL)
+                
+            if not mongo_uri:
+                return []
+                
+            client = mongo_registry.get_client(str(bot.id), mongo_uri)
+            if not client:
+                return []
+                
+            mongo_db = client[db_name]
+            conv_coll = mongo_db["conversations"]
+            msg_coll = mongo_db["messages"]
+            
+            # Fetch conversations for this bot (sort/limit locally during aggregation)
+            cursor = conv_coll.find({"bot_id": str(bot.id)}).sort("updated_at", -1).limit(skip + limit)
+            bot_convs = []
+            async for doc in cursor:
+                conv = Conversation(doc)
+                msg_count = await msg_coll.count_documents({"conversation_id": str(conv.id)})
+                bot_convs.append({
+                    "id": str(conv.id),
+                    "bot_id": str(conv.bot_id),
+                    "bot_name": bot_name_map.get(str(conv.bot_id), "Unknown Bot"),
+                    "user_identifier": conv.user_identifier,
+                    "created_at": conv.created_at.isoformat() if hasattr(conv.created_at, "isoformat") else str(conv.created_at),
+                    "updated_at": conv.updated_at.isoformat() if hasattr(conv.updated_at, "isoformat") else str(conv.updated_at),
+                    "updated_at_dt": conv.updated_at,
+                    "messages_count": msg_count,
+                })
+            return bot_convs
 
-        cursor = conv_coll.find({"bot_id": {"$in": bot_ids}}).sort("updated_at", -1).skip(skip).limit(limit)
-        conversations_data = []
-        async for doc in cursor:
-            conv = Conversation(doc)
-            msg_count = await msg_coll.count_documents({"conversation_id": str(conv.id)})
+        # Run queries in parallel
+        tasks = [fetch_bot_conversations(row.Bot, row.BotConfig) for row in bots_rows]
+        results = await asyncio.gather(*tasks)
+        
+        all_convs = []
+        for r in results:
+            all_convs.extend(r)
+            
+        # Sort globally by updated_at descending
+        all_convs.sort(key=lambda x: x["updated_at_dt"], reverse=True)
+        
+        # Paginate results
+        paginated_convs = all_convs[skip : skip + limit]
+        
+        # Strip datetime sorting key from responses
+        for c in paginated_convs:
+            c.pop("updated_at_dt", None)
 
-            conversations_data.append({
-                "id": str(conv.id),
-                "bot_id": str(conv.bot_id),
-                "bot_name": bot_name_map.get(str(conv.bot_id), "Unknown Bot"),
-                "user_identifier": conv.user_identifier,
-                "created_at": conv.created_at.isoformat(),
-                "updated_at": conv.updated_at.isoformat(),
-                "messages_count": msg_count,
-            })
-
-        return api_success_response(data=conversations_data)
+        return api_success_response(data=paginated_convs)
 
     except Exception as e:
         return api_error_response(
@@ -92,28 +133,22 @@ async def list_conversation_messages(
     Retrieve message transcripts for a specific session.
     """
     try:
-        # Verify ownership of the conversation's bot
+        from app.services.message import message_service
         from app.core.config import settings
         from app.core.mongo import mongo_registry
-        mongo_client = mongo_registry.get_client("conversations", settings.MONGODB_URL)
-        if not mongo_client:
+        
+        # 1. Resolve bot_id dynamically for this conversation
+        bot_id = await message_service._resolve_bot_id_for_conversation(db, conversation_id)
+        if not bot_id:
             return api_error_response(
                 message="Conversation not found.",
                 code="CONVERSATION_NOT_FOUND",
                 status_code=status.HTTP_404_NOT_FOUND,
             )
 
-        conv_doc = await mongo_client["chatbot"]["conversations"].find_one({"_id": str(conversation_id)})
-        if not conv_doc:
-            return api_error_response(
-                message="Conversation not found.",
-                code="CONVERSATION_NOT_FOUND",
-                status_code=status.HTTP_404_NOT_FOUND,
-            )
-        conv = Conversation(conv_doc)
-
+        # 2. Verify ownership of the conversation's bot
         bot_res = await db.execute(
-            select(Bot).where(Bot.id == conv.bot_id).where(Bot.created_by == current_user.id)
+            select(Bot).where(Bot.id == bot_id).where(Bot.created_by == current_user.id)
         )
         bot = bot_res.scalar_one_or_none()
         if not bot:
@@ -123,7 +158,35 @@ async def list_conversation_messages(
                 status_code=status.HTTP_404_NOT_FOUND,
             )
 
-        from app.services.message import message_service
+        # 3. Retrieve conversation details from correct MongoDB instance
+        from app.models.bot_config import BotConfig
+        bot_config_res = await db.execute(
+            select(BotConfig).where(BotConfig.bot_id == bot_id)
+        )
+        config = bot_config_res.scalars().first()
+
+        mongo_uri = None
+        db_name = "chatbot"
+        if config and config.use_custom_mongo and config.mongo_uri:
+            mongo_uri = config.mongo_uri
+            db_name = config.mongo_db_name or "chatbot"
+        else:
+            mongo_uri = settings.MONGODB_URL
+            db_name = mongo_registry.get_database_name(settings.MONGODB_URL)
+
+        client = mongo_registry.get_client(str(bot_id), mongo_uri)
+        conv_doc = None
+        if client:
+            conv_doc = await client[db_name]["conversations"].find_one({"_id": str(conversation_id)})
+
+        if not conv_doc:
+            return api_error_response(
+                message="Conversation not found.",
+                code="CONVERSATION_NOT_FOUND",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        
+        # 4. Fetch chronological message list
         messages = await message_service.fetch_conversation_history(db, conversation_id=conversation_id)
 
         messages_data = [

@@ -1,4 +1,6 @@
 import uuid
+import re
+import asyncio
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,7 +33,8 @@ async def get_analytics_summary(
     redis: Any = Depends(get_redis),
 ):
     """
-    Retrieve live aggregated statistics for the logged-in user's admin dashboard.
+    Retrieve live aggregated statistics for the logged-in user's admin dashboard
+    by parallel-querying each bot's respective MongoDB instance.
     """
     try:
         cache_key = f"cache:analytics_summary:{current_user.id}"
@@ -39,113 +42,139 @@ async def get_analytics_summary(
         if cached is not None:
             return api_success_response(data=cached)
 
-        # 1. Active Chatbots Count
-        bot_query = select(func.count(Bot.id)).where(Bot.created_by == current_user.id).where(Bot.is_active == True)
-        bot_res = await db.execute(bot_query)
-        active_bots = bot_res.scalar() or 0
+        # 1. Fetch all user's bots and their configurations
+        bot_configs_query = (
+            select(Bot, BotConfig)
+            .join(BotConfig, Bot.id == BotConfig.bot_id)
+            .where(Bot.created_by == current_user.id)
+        )
+        bot_configs_res = await db.execute(bot_configs_query)
+        bot_configs = bot_configs_res.all()
+        active_bots = sum(1 for bot, _ in bot_configs if bot.is_active)
 
-        # All user's bots (to filter conversations)
-        user_bots_query = select(Bot.id).where(Bot.created_by == current_user.id)
-        user_bots_res = await db.execute(user_bots_query)
-        bot_ids = user_bots_res.scalars().all()
-
-        from app.core.config import settings
-        from app.core.mongo import mongo_registry
-        mongo_client = mongo_registry.get_client("analytics", settings.MONGODB_URL)
-        mongo_db = mongo_client["chatbot"] if mongo_client else None
-
-        # 2. Conversations (24h)
-        conv_24h_count = 0
-        if bot_ids and mongo_db:
+        # 2. Define parallel worker to query individual bot MongoDB counts
+        async def fetch_bot_metrics(bot, config):
+            from app.core.config import settings
+            from app.core.mongo import mongo_registry
+            
+            # Resolve correct URI & db name for this bot
+            mongo_uri = None
+            db_name = "chatbot"
+            if config and config.use_custom_mongo and config.mongo_uri:
+                mongo_uri = config.mongo_uri
+                db_name = config.mongo_db_name or "chatbot"
+            else:
+                mongo_uri = settings.MONGODB_URL
+                db_name = mongo_registry.get_database_name(settings.MONGODB_URL)
+                
+            if not mongo_uri:
+                return {
+                    "conv_24h": 0, "docs": 0, "total_sessions": 0, 
+                    "fallback_hits": 0, "total_bot_responses": 0, 
+                    "total_chat_time": 0, "chat_time_sessions": 0
+                }
+                
+            client = mongo_registry.get_client(str(bot.id), mongo_uri)
+            if not client:
+                return {
+                    "conv_24h": 0, "docs": 0, "total_sessions": 0, 
+                    "fallback_hits": 0, "total_bot_responses": 0, 
+                    "total_chat_time": 0, "chat_time_sessions": 0
+                }
+                
+            mongo_db = client[db_name]
+            
+            # Fetch conversations count (24h)
             since_24h = datetime.now(timezone.utc) - timedelta(hours=24)
-            conv_24h_count = await mongo_db["conversations"].count_documents({
-                "bot_id": {"$in": [str(bid) for bid in bot_ids]},
+            conv_24h = await mongo_db["conversations"].count_documents({
+                "bot_id": str(bot.id),
                 "created_at": {"$gte": since_24h}
             })
-
-        # 3. Knowledge Docs Count
-        knowledge_docs = 0
-        if mongo_db:
-            knowledge_docs = await mongo_db["documents"].count_documents({
-                "created_by": str(current_user.id)
-            })
-
-        # 4. Success Rate & Avg. Chat Time
-        success_rate = 100.0
-        total_sessions = 0
-        avg_chat_time_seconds = 0
-
-        if bot_ids and mongo_db:
-            # Total sessions
+            
+            # Fetch knowledge documents count (always stored in the central MongoDB)
+            central_client = mongo_registry.get_client("analytics_central", settings.MONGODB_URL)
+            docs = 0
+            if central_client:
+                docs = await central_client["chatbot"]["knowledge_sources"].count_documents({
+                    "bot_id": str(bot.id)
+                })
+            
+            # Fetch total sessions
             total_sessions = await mongo_db["conversations"].count_documents({
-                "bot_id": {"$in": [str(bid) for bid in bot_ids]}
+                "bot_id": str(bot.id)
             })
-
-            # Calculate Success Rate
-            if total_sessions > 0:
-                bot_config_query = (
-                    select(BotConfig.bot_id, BotConfig.fallback_message)
-                    .join(Bot, BotConfig.bot_id == Bot.id)
-                    .where(Bot.created_by == current_user.id)
-                )
-                bot_config_res = await db.execute(bot_config_query)
-                bot_config_map = {str(r.bot_id): r.fallback_message for r in bot_config_res.all()}
-
-                conv_cursor = mongo_db["conversations"].find(
-                    {"bot_id": {"$in": [str(bid) for bid in bot_ids]}},
-                    {"_id": 1, "bot_id": 1}
-                )
-                conv_bot_map = {}
-                async for c_doc in conv_cursor:
-                    conv_bot_map[c_doc["_id"]] = c_doc["bot_id"]
-
-                fallback_hits = 0
-                total_bot_responses = 0
-
-                if conv_bot_map:
-                    messages_coll = mongo_db["messages"]
-                    cursor = messages_coll.find({
-                        "conversation_id": {"$in": list(conv_bot_map.keys())},
-                        "sender": "bot"
-                    })
-                    async for doc in cursor:
-                        total_bot_responses += 1
-                        conv_id = doc.get("conversation_id")
-                        content = doc.get("content", "")
-                        bot_id_str = conv_bot_map.get(conv_id)
-                        fallback = bot_config_map.get(bot_id_str)
-                        if fallback and content == fallback:
-                            fallback_hits += 1
-
-                if total_bot_responses > 0:
-                    success_rate = round(((total_bot_responses - fallback_hits) / total_bot_responses) * 100, 1)
-
-            # Calculate Avg. Session Duration
-            conv_ids = list(conv_bot_map.keys()) if 'conv_bot_map' in locals() else []
+            
+            # Fetch fallback rate and chat duration metrics
+            fallback_message = config.fallback_message or "I'm sorry, I am unable to assist with that query at the moment."
+            conv_cursor = mongo_db["conversations"].find({"bot_id": str(bot.id)}, {"_id": 1})
+            conv_ids = [c["_id"] async for c in conv_cursor]
+            
+            fallback_hits = 0
+            total_bot_responses = 0
+            total_chat_time = 0
+            chat_time_sessions = 0
+            
             if conv_ids:
-                from app.core.config import settings
-                from app.core.mongo import mongo_registry
-                mongo_client = mongo_registry.get_client("analytics", settings.MONGODB_URL)
-                if mongo_client:
-                    messages_coll = mongo_client["chatbot"]["messages"]
-                    pipeline = [
-                        {"$match": {"conversation_id": {"$in": conv_ids}}},
-                        {"$group": {
-                            "_id": "$conversation_id",
-                            "min_time": {"$min": "$created_at"},
-                            "max_time": {"$max": "$created_at"}
-                        }}
-                    ]
-                    cursor = messages_coll.aggregate(pipeline)
-                    async for doc in cursor:
-                        durations.append((doc["_id"], doc["min_time"], doc["max_time"]))
+                fallback_hits = await mongo_db["messages"].count_documents({
+                    "conversation_id": {"$in": conv_ids},
+                    "sender": "bot",
+                    "content": {"$regex": re.escape(fallback_message), "$options": "i"}
+                })
+                total_bot_responses = await mongo_db["messages"].count_documents({
+                    "conversation_id": {"$in": conv_ids},
+                    "sender": "bot"
+                })
+                
+                # Chat duration calculations using message times
+                pipeline = [
+                    {"$match": {"conversation_id": {"$in": conv_ids}}},
+                    {"$group": {
+                        "_id": "$conversation_id",
+                        "min_time": {"$min": "$created_at"},
+                        "max_time": {"$max": "$created_at"}
+                    }}
+                ]
+                dur_cursor = mongo_db["messages"].aggregate(pipeline)
+                async for d_doc in dur_cursor:
+                    min_time = d_doc.get("min_time")
+                    max_time = d_doc.get("max_time")
+                    if min_time and max_time and min_time != max_time:
+                        diff = (max_time - min_time).total_seconds()
+                        if 0 < diff < 7200: # cap session at 2 hours max
+                            total_chat_time += diff
+                            chat_time_sessions += 1
+                                
+            return {
+                "conv_24h": conv_24h,
+                "docs": docs,
+                "total_sessions": total_sessions,
+                "fallback_hits": fallback_hits,
+                "total_bot_responses": total_bot_responses,
+                "total_chat_time": total_chat_time,
+                "chat_time_sessions": chat_time_sessions
+            }
 
-            if durations:
-                total_duration_secs = 0
-                for _, min_time, max_time in durations:
-                    if min_time and max_time:
-                        total_duration_secs += (max_time - min_time).total_seconds()
-                avg_chat_time_seconds = int(total_duration_secs / len(durations))
+        # 3. Trigger queries concurrently across all databases
+        tasks = [fetch_bot_metrics(bot, config) for bot, config in bot_configs]
+        metrics_results = await asyncio.gather(*tasks)
+
+        # 4. Sum up all metric responses
+        conv_24h_count = sum(m["conv_24h"] for m in metrics_results)
+        knowledge_docs = sum(m["docs"] for m in metrics_results)
+        total_sessions = sum(m["total_sessions"] for m in metrics_results)
+        total_fallback_hits = sum(m["fallback_hits"] for m in metrics_results)
+        total_bot_responses = sum(m["total_bot_responses"] for m in metrics_results)
+        total_chat_time = sum(m["total_chat_time"] for m in metrics_results)
+        chat_time_sessions = sum(m["chat_time_sessions"] for m in metrics_results)
+
+        # 5. Compute rates
+        success_rate = 100.0
+        if total_bot_responses > 0:
+            success_rate = round(((total_bot_responses - total_fallback_hits) / total_bot_responses) * 100, 1)
+
+        avg_chat_time_seconds = 0
+        if chat_time_sessions > 0:
+            avg_chat_time_seconds = int(total_chat_time / chat_time_sessions)
 
         # Format average chat time e.g., "3m 42s" or "12s"
         if avg_chat_time_seconds >= 60:
@@ -164,8 +193,8 @@ async def get_analytics_summary(
             "avg_chat_time": avg_chat_time,
         }
 
-        # Cache summary for 5 minutes
-        await set_cached_val(redis, cache_key, summary_data, expire_seconds=300)
+        # Cache live summary for 2 minutes to save database lookup overhead
+        await set_cached_val(redis, cache_key, summary_data, expire_seconds=120)
 
         return api_success_response(data=summary_data)
 

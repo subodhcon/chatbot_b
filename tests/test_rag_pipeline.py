@@ -113,3 +113,24 @@ def test_out_of_context_fallback_detection():
     # Combined confidence should be zeroed out
     assert res_fallback["answer_confidence"] == 0.0
     assert res_fallback["combined_confidence"] == 0.0
+
+@pytest.mark.asyncio
+async def test_query_condensation_bypass():
+    """
+    Test 6: Verify query condensation bypass rules.
+    """
+    from app.services.response_pipeline import ai_response_pipeline_service
+    
+    # 1. Trivial greeting should bypass
+    res_greeting = await ai_response_pipeline_service._condense_query(
+        "hello",
+        chat_history=[{"role": "user", "content": "previous message"}]
+    )
+    assert res_greeting == "hello"
+    
+    # 2. Standalone query without pronouns should bypass
+    res_standalone = await ai_response_pipeline_service._condense_query(
+        "tell me about gayaji places",
+        chat_history=[{"role": "user", "content": "hi"}]
+    )
+    assert res_standalone == "tell me about gayaji places"

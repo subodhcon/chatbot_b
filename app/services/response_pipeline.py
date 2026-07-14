@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import List, Dict, Any, AsyncGenerator, Union
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +32,30 @@ class AIResponsePipelineService:
         model_name: str = "gpt-4o-mini"
     ) -> str:
         if not chat_history or len(chat_history) == 0:
+            return user_question
+
+        # Bypass LLM call for simple greetings, feedback, or short inputs
+        cleaned_question = user_question.strip().lower().rstrip("?.!")
+        simple_phrases = {
+            "hi", "hello", "hey", "hola", "ok", "okay", "yes", "no", "yep", "nope", 
+            "thanks", "thank you", "thanks a lot", "thank you so much", 
+            "bye", "goodbye", "help", "menu"
+        }
+        if cleaned_question in simple_phrases or len(cleaned_question) < 8:
+            return user_question
+
+        # Check for coreferences or context-specific pronouns that indicate history dependence
+        context_words = {
+            "it", "he", "she", "they", "them", "that", "this", "these", "those",
+            "him", "her", "his", "their", "theirs", "its", "here", "there", 
+            "then", "which", "who", "whom", "whose", "why", "how", "what", "where",
+            "another", "other", "same"
+        }
+        words = set(re.findall(r'\b\w+\b', cleaned_question))
+        has_context_trigger = any(w in context_words for w in words)
+        
+        # If there are no context words, the query is likely standalone - bypass LLM condensation
+        if not has_context_trigger:
             return user_question
 
         # Format recent chat history for the condensation prompt

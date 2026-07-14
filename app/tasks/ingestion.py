@@ -84,7 +84,8 @@ def ingest_knowledge_source(self, job_id: str) -> str:
             return f"Source not found: {job.source_id}"
         source = KnowledgeSource(source_doc)
 
-        # 3. Update status to processing in MongoDB
+        # 3. Update status to processing in MongoDB and attach active embedding model used
+        active_model = openai_embedding_service.get_active_model_name()
         mongo_db["ingestion_jobs"].update_one(
             {"_id": str(job_id)},
             {"$set": {
@@ -95,7 +96,10 @@ def ingest_knowledge_source(self, job_id: str) -> str:
         )
         mongo_db["knowledge_sources"].update_one(
             {"_id": str(source.id)},
-            {"$set": {"status": "processing"}}
+            {"$set": {
+                "status": "processing",
+                "embedding_model": active_model
+            }}
         )
         job.status = IngestionJobStatus.processing
         job.progress = 10
@@ -215,6 +219,7 @@ def ingest_knowledge_source(self, job_id: str) -> str:
                                 "chunk_index": c["chunk_index"],
                                 "content": c["content"],
                                 "token_count": c["token_count"],
+                                "embedding_model": active_model,
                                 "created_at": datetime.utcnow()
                             }
                             if idx < len(embeddings_vectors):
@@ -264,6 +269,7 @@ def ingest_knowledge_source(self, job_id: str) -> str:
                         "chunk_index": c["chunk_index"],
                         "content": c["content"],
                         "token_count": c["token_count"],
+                        "embedding_model": active_model,
                         "created_at": datetime.utcnow()
                     }
                     if idx < len(embeddings_vectors):

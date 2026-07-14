@@ -24,6 +24,14 @@ class OpenAIEmbeddingService:
         self.model = model
         self._client = None
 
+    def get_active_model_name(self) -> str:
+        api_key_to_use = self.api_key
+        if api_key_to_use and api_key_to_use.startswith("gsk_"):
+            api_key_to_use = GEMINI_FALLBACK_KEY
+        if api_key_to_use and (api_key_to_use.startswith("AIzaSy") or api_key_to_use.startswith("AQ.")):
+            return "models/gemini-embedding-001"
+        return self.model
+
     @property
     def client(self) -> OpenAI:
         if not self._client:

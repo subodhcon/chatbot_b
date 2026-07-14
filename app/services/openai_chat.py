@@ -220,9 +220,11 @@ class OpenAIChatService(BaseChatService):
                         body = await response.aread()
                         raise ValueError(f"Gemini Stream API error: {response.status_code} - {body.decode()}")
                     
+                    import codecs
+                    decoder = codecs.getincrementaldecoder("utf-8")()
                     buffer = ""
                     async for chunk in response.aiter_bytes():
-                        buffer += chunk.decode("utf-8")
+                        buffer += decoder.decode(chunk)
                         braces = 0
                         start = -1
                         for idx, char in enumerate(buffer):

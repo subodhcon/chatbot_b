@@ -1,9 +1,7 @@
 import uuid
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta, time
 from typing import Dict, Any, List, Optional
-from sqlalchemy import select, func, Date, and_
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.conversation import Conversation
 from app.models.feedback_rating import FeedbackRating, FeedbackRatingValue
@@ -19,7 +17,7 @@ class AnalyticsAggregationService:
 
     async def get_bot_summary_metrics(
         self,
-        db: AsyncSession,
+        db: Any,
         bot_id: uuid.UUID,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
@@ -30,72 +28,66 @@ class AnalyticsAggregationService:
         """
         logger.info(f"Aggregating summary metrics for bot {bot_id}")
 
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
+
+        mongo_client = mongo_registry.get_client("analytics", settings.MONGODB_URL)
+        if not mongo_client:
+            return {
+                "total_conversations": 0,
+                "total_messages": 0,
+                "positive_ratings": 0,
+                "negative_ratings": 0,
+                "total_rated": 0,
+                "helpful_rate": 0.0,
+            }
+
+        db_name = "chatbot"
+        conv_coll = mongo_client[db_name]["conversations"]
+        rating_coll = mongo_client[db_name]["feedback_ratings"]
+        messages_coll = mongo_client[db_name]["messages"]
+
         # Construct time filters
-        time_filters = []
-        if start_date:
-            time_filters.append(Conversation.created_at >= start_date)
-        if end_date:
-            time_filters.append(Conversation.created_at <= end_date)
+        query = {"bot_id": str(bot_id)}
+        if start_date or end_date:
+            date_filter = {}
+            if start_date:
+                date_filter["$gte"] = start_date
+            if end_date:
+                date_filter["$lte"] = end_date
+            query["created_at"] = date_filter
 
         # 1. Total Conversations
-        conv_query = select(func.count(Conversation.id)).where(
-            Conversation.bot_id == bot_id,
-            *time_filters
-        )
-        conv_res = await db.execute(conv_query)
-        total_conversations = conv_res.scalar_one() or 0
+        total_conversations = await conv_coll.count_documents(query)
 
         # 2. Total Messages
-        conv_ids_query = select(Conversation.id).where(
-            Conversation.bot_id == bot_id,
-            *time_filters
-        )
-        conv_ids_res = await db.execute(conv_ids_query)
-        conv_ids = [str(cid) for cid in conv_ids_res.scalars().all()]
-        
+        cursor = conv_coll.find(query, {"_id": 1})
+        conv_ids = [doc["_id"] async for doc in cursor]
+
         total_messages = 0
         if conv_ids:
-            from app.core.config import settings
-            from app.core.mongo import mongo_registry
-            from app.models.bot_config import BotConfig
-            
-            bot_config_res = await db.execute(
-                select(BotConfig).where(BotConfig.bot_id == bot_id)
-            )
-            bot_config = bot_config_res.scalars().first()
-            mongo_uri = (bot_config.mongo_uri or settings.MONGODB_URL) if bot_config else settings.MONGODB_URL
-            if mongo_uri:
-                mongo_client = mongo_registry.get_client(str(bot_id), mongo_uri)
-                if mongo_client:
-                    db_name = bot_config.mongo_db_name or "chatbot" if bot_config else "chatbot"
-                    messages_coll = mongo_client[db_name]["messages"]
-                    total_messages = await messages_coll.count_documents({"conversation_id": {"$in": conv_ids}})
+            total_messages = await messages_coll.count_documents({"conversation_id": {"$in": conv_ids}})
 
         # 3. Thumbs Up Ratings
-        thumbs_up_query = (
-            select(func.count(FeedbackRating.id))
-            .join(Conversation, FeedbackRating.conversation_id == Conversation.id)
-            .where(
-                Conversation.bot_id == bot_id,
-                FeedbackRating.rating == FeedbackRatingValue.thumbs_up,
-                *time_filters
-            )
-        )
-        thumbs_up_res = await db.execute(thumbs_up_query)
-        positive_ratings = thumbs_up_res.scalar_one() or 0
+        positive_ratings = 0
+        negative_ratings = 0
+        if conv_ids:
+            rating_query = {
+                "conversation_id": {"$in": conv_ids},
+                "rating": "thumbs_up"
+            }
+            if start_date or end_date:
+                date_filter = {}
+                if start_date:
+                    date_filter["$gte"] = start_date
+                if end_date:
+                    date_filter["$lte"] = end_date
+                rating_query["created_at"] = date_filter
+            positive_ratings = await rating_coll.count_documents(rating_query)
 
-        # 4. Thumbs Down Ratings
-        thumbs_down_query = (
-            select(func.count(FeedbackRating.id))
-            .join(Conversation, FeedbackRating.conversation_id == Conversation.id)
-            .where(
-                Conversation.bot_id == bot_id,
-                FeedbackRating.rating == FeedbackRatingValue.thumbs_down,
-                *time_filters
-            )
-        )
-        thumbs_down_res = await db.execute(thumbs_down_query)
-        negative_ratings = thumbs_down_res.scalar_one() or 0
+            # 4. Thumbs Down Ratings
+            rating_query["rating"] = "thumbs_down"
+            negative_ratings = await rating_coll.count_documents(rating_query)
 
         # Calculate helper rates
         total_rated = positive_ratings + negative_ratings
@@ -112,7 +104,7 @@ class AnalyticsAggregationService:
 
     async def get_conversation_volume(
         self,
-        db: AsyncSession,
+        db: Any,
         bot_id: uuid.UUID,
         days_limit: int = 30,
     ) -> List[Dict[str, Any]]:
@@ -121,27 +113,39 @@ class AnalyticsAggregationService:
         """
         logger.info(f"Aggregating conversation volume for bot {bot_id} (days_limit={days_limit})")
 
-        # Select casted date and count of conversations
-        date_expr = func.cast(Conversation.created_at, Date)
-        query = (
-            select(date_expr, func.count(Conversation.id))
-            .where(Conversation.bot_id == bot_id)
-        )
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
 
+        mongo_client = mongo_registry.get_client("analytics", settings.MONGODB_URL)
+        if not mongo_client:
+            return []
+
+        db_name = "chatbot"
+        conv_coll = mongo_client[db_name]["conversations"]
+
+        # Construct match query
+        match_query = {"bot_id": str(bot_id)}
         if days_limit > 0:
-            from datetime import timedelta, time
             start_date = date.today() - timedelta(days=days_limit - 1)
             start_datetime = datetime.combine(start_date, time.min)
-            query = query.where(Conversation.created_at >= start_datetime)
+            match_query["created_at"] = {"$gte": start_datetime}
 
-        query = query.group_by(date_expr).order_by(date_expr.asc())
-
-        res = await db.execute(query)
-        rows = res.all()
+        cursor = conv_coll.find(match_query, {"created_at": 1})
+        counts = {}
+        async for doc in cursor:
+            dt = doc.get("created_at")
+            if dt:
+                if isinstance(dt, datetime):
+                    date_str = dt.date().isoformat()
+                elif isinstance(dt, str):
+                    date_str = dt.split("T")[0]
+                else:
+                    date_str = str(dt)
+                counts[date_str] = counts.get(date_str, 0) + 1
 
         volume_data = [
-            {"date": str(row[0]), "count": row[1]}
-            for row in rows
+            {"date": d, "count": counts[d]}
+            for d in sorted(counts.keys())
         ]
 
         return volume_data

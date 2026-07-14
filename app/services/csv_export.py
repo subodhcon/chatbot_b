@@ -42,37 +42,46 @@ class CSVExportService:
         config_res = await db.execute(config_query)
         gdpr_enabled = config_res.scalar() or False
 
-        # 1. Query conversations within range
-        conv_query = select(Conversation.id).where(
-            Conversation.bot_id == bot_id,
-            Conversation.created_at >= start_date,
-            Conversation.created_at <= end_date,
-        )
-        conv_res = await db.execute(conv_query)
-        conv_ids = [str(cid) for cid in conv_res.scalars().all()]
+        # 1. Query conversations within range from MongoDB
+        from app.core.config import settings
+        from app.core.mongo import mongo_registry
 
-        # Query feedback ratings for these conversations
+        mongo_client = mongo_registry.get_client(str(bot_id), settings.MONGODB_URL)
+        if not mongo_client:
+            raise RuntimeError("Failed to establish MongoDB client connection.")
+
+        db_name = "chatbot"
+        conv_coll = mongo_client[db_name]["conversations"]
+        rating_coll = mongo_client[db_name]["feedback_ratings"]
+
+        conv_filter = {
+            "bot_id": str(bot_id),
+            "created_at": {"$gte": start_date, "$lte": end_date}
+        }
+        cursor = conv_coll.find(conv_filter, {"_id": 1})
+        conv_ids = [doc["_id"] async for doc in cursor]
+
+        # Query feedback ratings for these conversations from MongoDB
         feedback_map = {}
         if conv_ids:
-            feedback_query = select(FeedbackRating.message_id, FeedbackRating.rating).where(
-                FeedbackRating.conversation_id.in_([uuid.UUID(cid) for cid in conv_ids])
-            )
-            feedback_res = await db.execute(feedback_query)
-            feedback_map = {str(r.message_id): r.rating for r in feedback_res.all()}
+            rating_cursor = rating_coll.find({
+                "conversation_id": {"$in": conv_ids}
+            }, {"message_id": 1, "rating": 1})
+            async for r_doc in rating_cursor:
+                msg_id = r_doc.get("message_id")
+                rating = r_doc.get("rating")
+                if msg_id:
+                    feedback_map[str(msg_id)] = rating
 
         # Fetch messages from MongoDB
         mongo_messages = []
         if conv_ids:
-            from app.core.config import settings
-            from app.core.mongo import mongo_registry
-            mongo_client = mongo_registry.get_client(str(bot_id), settings.MONGODB_URL)
-            if mongo_client:
-                messages_coll = mongo_client["chatbot"]["messages"]
-                cursor = messages_coll.find({
-                    "conversation_id": {"$in": conv_ids}
-                }).sort([("conversation_id", 1), ("created_at", 1)])
-                async for doc in cursor:
-                    mongo_messages.append(doc)
+            messages_coll = mongo_client["chatbot"]["messages"]
+            cursor = messages_coll.find({
+                "conversation_id": {"$in": conv_ids}
+            }).sort([("conversation_id", 1), ("created_at", 1)])
+            async for doc in cursor:
+                mongo_messages.append(doc)
 
         rows = []
         for doc in mongo_messages:

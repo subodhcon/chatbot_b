@@ -3,6 +3,7 @@ from typing import List, Dict, Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.knowledge_source import KnowledgeSource
+from app.services.openai_embeddings import openai_embedding_service
 
 logger = logging.getLogger("app.services.vector_search")
 
@@ -57,6 +58,16 @@ class VectorSearchService:
                 mongo_db = mongo_client[db_name]
                 chunks_collection = mongo_db["chunks"]
                 
+                active_model = openai_embedding_service.get_active_model_name()
+                filter_cond = {"embedding_model": active_model}
+                if active_model == "text-embedding-3-small":
+                    filter_cond = {
+                        "$or": [
+                            {"embedding_model": active_model},
+                            {"embedding_model": {"$exists": False}}
+                        ]
+                    }
+
                 pipeline = [
                     {
                         "$vectorSearch": {
@@ -64,7 +75,8 @@ class VectorSearchService:
                             "path": "embedding_vector",
                             "queryVector": query_vector,
                             "numCandidates": max(100, top_k * 10),
-                            "limit": top_k
+                            "limit": top_k,
+                            "filter": filter_cond
                         }
                     },
                     {
@@ -138,18 +150,12 @@ class VectorSearchService:
                         
                         source_ids = list(sources_map.keys())
                         
-                        # 2. Fetch all chunks matching these source IDs
+                        # 2. Fetch chunks matching source IDs and evaluate on the fly with a min-heap
                         cursor_chunks = chunks_collection.find({"source_id": {"$in": source_ids}})
-                        all_chunks = []
-                        async for ch in cursor_chunks:
-                            all_chunks.append(ch)
                         
-                        if not all_chunks:
-                            logger.info("Local similarity: No chunks found in database.")
-                            return []
-                        
-                        # 3. Calculate cosine similarity in Python
                         import math
+                        import heapq
+                        
                         def cosine_similarity(v1, v2):
                             if not v1 or not v2 or len(v1) != len(v2):
                                 return 0.0
@@ -159,16 +165,43 @@ class VectorSearchService:
                             if norm1 == 0.0 or norm2 == 0.0:
                                 return 0.0
                             return dot / (norm1 * norm2)
+
+                        scored_heap = []
+                        chunk_counter = 0
+                        max_scanned_chunks = 10000  # Safety cap to avoid scanning excessive number of chunks
                         
-                        scored_chunks = []
-                        for ch in all_chunks:
+                        active_model = openai_embedding_service.get_active_model_name()
+                        async for ch in cursor_chunks:
+                            chunk_counter += 1
+                            if chunk_counter > max_scanned_chunks:
+                                logger.warning(f"Local similarity: Safety cap of {max_scanned_chunks} reached. Aborting scan.")
+                                break
+                            
+                            # Filter based on active embedding model consistency
+                            ch_model = ch.get("embedding_model")
+                            if not ch_model:
+                                ch_model = "text-embedding-3-small"
+                            if ch_model != active_model:
+                                continue
+                            
                             emb = ch.get("embedding_vector")
                             if not emb:
                                 continue
+                            
                             score = cosine_similarity(query_vector, emb)
-                            scored_chunks.append((score, ch))
+                            
+                            # Keep only the top K chunks using a min-heap
+                            if len(scored_heap) < top_k:
+                                heapq.heappush(scored_heap, (score, chunk_counter, ch))
+                            elif score > scored_heap[0][0]:
+                                heapq.heappushpop(scored_heap, (score, chunk_counter, ch))
                         
-                        scored_chunks.sort(key=lambda x: x[0], reverse=True)
+                        if not scored_heap:
+                            logger.info("Local similarity: No chunks found or evaluated in database.")
+                            return []
+
+                        # Sort heap to get descending scores
+                        scored_chunks = sorted(scored_heap, key=lambda x: x[0], reverse=True)
                         
                         # Auto-adjust threshold: if no chunks pass the min_score, take the top match anyway
                         effective_min_score = min_score
@@ -178,7 +211,7 @@ class VectorSearchService:
                         top_chunks = [x for x in scored_chunks if x[0] >= effective_min_score][:top_k]
                         
                         search_results = []
-                        for score, doc in top_chunks:
+                        for score, _, doc in top_chunks:
                             source = sources_map.get(str(doc.get("source_id")))
                             search_results.append({
                                 "chunk": {

@@ -58,6 +58,11 @@ class VectorSearchService:
                 mongo_db = mongo_client[db_name]
                 chunks_collection = mongo_db["chunks"]
                 
+                # Resolve central MongoDB database for global metadata like knowledge_sources
+                central_client = mongo_registry.get_client("central", settings.MONGODB_URL)
+                central_db_name = mongo_registry.get_database_name(settings.MONGODB_URL)
+                central_db = central_client[central_db_name]
+                
                 active_model = openai_embedding_service.get_active_model_name()
                 filter_cond = {"embedding_model": active_model}
                 if active_model == "text-embedding-3-small":
@@ -104,7 +109,7 @@ class VectorSearchService:
                     source_ids = [str(doc["source_id"]) for doc in mongo_results if "source_id" in doc]
                     sources_map = {}
                     if source_ids:
-                        cursor_sources = mongo_db["knowledge_sources"].find({
+                        cursor_sources = central_db["knowledge_sources"].find({
                             "_id": {"$in": source_ids}
                         })
                         async for s_doc in cursor_sources:
@@ -138,7 +143,7 @@ class VectorSearchService:
                     logger.warning(f"MongoDB vector search failed, falling back to local python similarity search: {mongo_err}")
                     try:
                         # 1. Fetch all sources for this bot to map and filter chunks
-                        cursor_sources = mongo_db["knowledge_sources"].find({"bot_id": str(bot_id)})
+                        cursor_sources = central_db["knowledge_sources"].find({"bot_id": str(bot_id)})
                         sources_map = {}
                         async for s_doc in cursor_sources:
                             s = KnowledgeSource(s_doc)

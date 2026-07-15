@@ -48,7 +48,7 @@ class VectorSearchService:
         if bot_config and bot_config.use_custom_mongo and bot_config.mongo_uri:
             mongo_uri = bot_config.mongo_uri
             db_name = bot_config.mongo_db_name or "chatbot"
-        elif settings.MONGODB_URL and ("localhost" not in settings.MONGODB_URL or "pytest" in __import__("sys").modules):
+        elif settings.MONGODB_URL:
             mongo_uri = settings.MONGODB_URL
             db_name = mongo_registry.get_database_name(settings.MONGODB_URL)
             

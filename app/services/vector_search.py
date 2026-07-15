@@ -184,9 +184,7 @@ class VectorSearchService:
                             
                             # Filter based on active embedding model consistency
                             ch_model = ch.get("embedding_model")
-                            if not ch_model:
-                                ch_model = "text-embedding-3-small"
-                            if ch_model != active_model:
+                            if ch_model and ch_model != active_model:
                                 continue
                             
                             emb = ch.get("embedding_vector")

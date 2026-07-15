@@ -312,8 +312,11 @@ async def create_bot_data_export(
 
         # 3. Generate the export CSV file
         try:
-            job.status = ExportJobStatus.processing
-            await db.commit()
+            job = await export_job_repository.update_async(
+                db,
+                db_obj=job,
+                obj_in={"status": ExportJobStatus.processing.value}
+            )
 
             file_path = await csv_export_service.generate_export(
                 db,
@@ -322,14 +325,21 @@ async def create_bot_data_export(
                 end_date=payload.end_date,
             )
 
-            job.file_path = file_path
-            job.status = ExportJobStatus.completed
-            await db.commit()
-            await db.refresh(job)
+            job = await export_job_repository.update_async(
+                db,
+                db_obj=job,
+                obj_in={
+                    "status": ExportJobStatus.completed.value,
+                    "file_path": file_path
+                }
+            )
 
         except Exception as export_err:
-            job.status = ExportJobStatus.failed
-            await db.commit()
+            await export_job_repository.update_async(
+                db,
+                db_obj=job,
+                obj_in={"status": ExportJobStatus.failed.value}
+            )
             raise export_err
 
         # 4. Generate dynamic download URL

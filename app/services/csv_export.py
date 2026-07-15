@@ -37,20 +37,29 @@ class CSVExportService:
         """
         logger.info(f"Generating CSV export for bot {bot_id} (Range: {start_date} to {end_date})")
 
-        # Fetch GDPR setting for this bot
-        config_query = select(BotConfig.gdpr_enabled).where(BotConfig.bot_id == bot_id)
+        # Fetch bot config
+        config_query = select(BotConfig).where(BotConfig.bot_id == bot_id)
         config_res = await db.execute(config_query)
-        gdpr_enabled = config_res.scalar() or False
+        bot_config = config_res.scalars().first()
+        gdpr_enabled = bot_config.gdpr_enabled if bot_config else False
 
         # 1. Query conversations within range from MongoDB
         from app.core.config import settings
         from app.core.mongo import mongo_registry
 
-        mongo_client = mongo_registry.get_client(str(bot_id), settings.MONGODB_URL)
+        mongo_uri = None
+        db_name = "chatbot"
+        if bot_config and bot_config.use_custom_mongo:
+            mongo_uri = bot_config.mongo_uri or settings.MONGODB_URL
+            db_name = bot_config.mongo_db_name or mongo_registry.get_database_name(mongo_uri)
+        else:
+            mongo_uri = settings.MONGODB_URL
+            db_name = mongo_registry.get_database_name(mongo_uri)
+
+        mongo_client = mongo_registry.get_client(str(bot_id), mongo_uri)
         if not mongo_client:
             raise RuntimeError("Failed to establish MongoDB client connection.")
 
-        db_name = "chatbot"
         conv_coll = mongo_client[db_name]["conversations"]
         rating_coll = mongo_client[db_name]["feedback_ratings"]
 
@@ -58,8 +67,10 @@ class CSVExportService:
             "bot_id": str(bot_id),
             "created_at": {"$gte": start_date, "$lte": end_date}
         }
+        logger.info(f"MongoDB collection query filter: {conv_filter} on {db_name}")
         cursor = conv_coll.find(conv_filter, {"_id": 1})
         conv_ids = [doc["_id"] async for doc in cursor]
+        logger.info(f"MongoDB query matched conv_ids: {conv_ids}")
 
         # Query feedback ratings for these conversations from MongoDB
         feedback_map = {}
@@ -76,7 +87,7 @@ class CSVExportService:
         # Fetch messages from MongoDB
         mongo_messages = []
         if conv_ids:
-            messages_coll = mongo_client["chatbot"]["messages"]
+            messages_coll = mongo_client[db_name]["messages"]
             cursor = messages_coll.find({
                 "conversation_id": {"$in": conv_ids}
             }).sort([("conversation_id", 1), ("created_at", 1)])
@@ -108,15 +119,15 @@ class CSVExportService:
             
             # Data Rows
             for row in rows:
-                content = row.content
+                content = row[3]
                 if gdpr_enabled:
                     content = pii_masking_service.mask_text(content)
                 writer.writerow([
-                    str(row.conversation_id),
-                    row.created_at.isoformat(),
-                    row.sender,
+                    str(row[0]),
+                    row[1].isoformat() if hasattr(row[1], 'isoformat') else str(row[1]),
+                    row[2],
                     content,
-                    row.rating.value if row.rating else "",
+                    str(row[4]) if row[4] else "",
                 ])
 
 

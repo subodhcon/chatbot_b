@@ -34,11 +34,27 @@ class CSATCalculationService:
         # Get bot conversations from MongoDB
         from app.core.config import settings
         from app.core.mongo import mongo_registry
-        mongo_client = mongo_registry.get_client("csat", settings.MONGODB_URL)
+        from app.models.bot_config import BotConfig
+        from sqlalchemy import select
+
+        # Resolve MongoDB config
+        bot_config_res = await db.execute(
+            select(BotConfig).where(BotConfig.bot_id == bot_id)
+        )
+        bot_config = bot_config_res.scalars().first()
+        
+        mongo_uri = None
+        db_name = "chatbot"
+        if bot_config and bot_config.use_custom_mongo:
+            mongo_uri = bot_config.mongo_uri or settings.MONGODB_URL
+            db_name = bot_config.mongo_db_name or mongo_registry.get_database_name(mongo_uri)
+        else:
+            mongo_uri = settings.MONGODB_URL
+            db_name = mongo_registry.get_database_name(mongo_uri)
+
+        mongo_client = mongo_registry.get_client(str(bot_id), mongo_uri)
         if not mongo_client:
             return 0.0
-            
-        db_name = "chatbot"
         conv_coll = mongo_client[db_name]["conversations"]
         rating_coll = mongo_client[db_name]["feedback_ratings"]
         

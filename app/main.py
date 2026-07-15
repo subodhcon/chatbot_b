@@ -14,6 +14,7 @@ from app.core.exceptions import setup_exception_handlers
 from app.api.router import api_router
 from app.db.session import get_db
 from app.utils.redis import get_redis, close_redis
+import app.models  # Register all SQLAlchemy models in metadata registry on startup
 
 logger = logging.getLogger("app.request")
 

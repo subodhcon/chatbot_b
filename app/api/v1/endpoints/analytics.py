@@ -54,121 +54,123 @@ async def get_analytics_summary(
 
         # 2. Define parallel worker to query individual bot MongoDB counts
         async def fetch_bot_metrics(bot, config):
-            from app.core.config import settings
-            from app.core.mongo import mongo_registry
-            
-            # Resolve correct URI & db name for this bot
-            mongo_uri = None
-            db_name = "chatbot"
-            if config and config.use_custom_mongo and config.mongo_uri:
-                mongo_uri = config.mongo_uri
-                db_name = config.mongo_db_name or "chatbot"
-            else:
-                mongo_uri = settings.MONGODB_URL
-                db_name = mongo_registry.get_database_name(settings.MONGODB_URL)
+            try:
+                from app.core.config import settings
+                from app.core.mongo import mongo_registry
                 
-            if not mongo_uri:
-                return {
-                    "conv_24h": 0, "docs": 0, "total_sessions": 0, 
-                    "fallback_hits": 0, "total_bot_responses": 0, 
-                    "total_chat_time": 0, "chat_time_sessions": 0
-                }
+                # Resolve correct URI & db name for this bot
+                mongo_uri = None
+                db_name = "chatbot"
+                if config and config.use_custom_mongo and config.mongo_uri:
+                    mongo_uri = config.mongo_uri
+                    db_name = config.mongo_db_name or "chatbot"
+                else:
+                    mongo_uri = settings.MONGODB_URL
+                    db_name = mongo_registry.get_database_name(settings.MONGODB_URL)
+                    
+                if not mongo_uri:
+                    return {
+                        "conv_24h": 0, "docs": 0, "total_sessions": 0, 
+                        "fallback_hits": 0, "total_bot_responses": 0, 
+                        "total_chat_time": 0, "chat_time_sessions": 0
+                    }
+                    
+                client = mongo_registry.get_client(str(bot.id), mongo_uri)
+                if not client:
+                    return {
+                        "conv_24h": 0, "docs": 0, "total_sessions": 0, 
+                        "fallback_hits": 0, "total_bot_responses": 0, 
+                        "total_chat_time": 0, "chat_time_sessions": 0
+                    }
+                    
+                mongo_db = client[db_name]
                 
-            client = mongo_registry.get_client(str(bot.id), mongo_uri)
-            if not client:
-                return {
-                    "conv_24h": 0, "docs": 0, "total_sessions": 0, 
-                    "fallback_hits": 0, "total_bot_responses": 0, 
-                    "total_chat_time": 0, "chat_time_sessions": 0
-                }
+                # Fetch conversations count (24h)
+                since_24h = datetime.now(timezone.utc) - timedelta(hours=24)
+                conv_24h = await mongo_db["conversations"].count_documents({
+                    "bot_id": str(bot.id),
+                    "created_at": {"$gte": since_24h}
+                })
                 
-            mongo_db = client[db_name]
-            
-            # Fetch conversations count (24h)
-            since_24h = datetime.now(timezone.utc) - timedelta(hours=24)
-            conv_24h = await mongo_db["conversations"].count_documents({
-                "bot_id": str(bot.id),
-                "created_at": {"$gte": since_24h}
-            })
-            
-            # Fetch knowledge documents count (always stored in the central MongoDB)
-            central_client = mongo_registry.get_client("analytics_central", settings.MONGODB_URL)
-            docs = 0
-            if central_client:
-                docs = await central_client["chatbot"]["knowledge_sources"].count_documents({
+                # Fetch knowledge documents count (always stored in the central MongoDB)
+                central_client = mongo_registry.get_client("analytics_central", settings.MONGODB_URL)
+                docs = 0
+                if central_client:
+                    docs = await central_client["chatbot"]["knowledge_sources"].count_documents({
+                        "bot_id": str(bot.id)
+                    })
+                
+                # Fetch total sessions
+                total_sessions = await mongo_db["conversations"].count_documents({
                     "bot_id": str(bot.id)
                 })
-            
-            # Fetch total sessions
-            total_sessions = await mongo_db["conversations"].count_documents({
-                "bot_id": str(bot.id)
-            })
-            
-            # Fetch fallback rate and chat duration metrics
-            fallback_message = config.fallback_message or "I'm sorry, I am unable to assist with that query at the moment."
-            conv_cursor = mongo_db["conversations"].find({"bot_id": str(bot.id)}, {"_id": 1})
-            conv_ids = [c["_id"] async for c in conv_cursor]
-            
-            fallback_hits = 0
-            total_bot_responses = 0
-            total_chat_time = 0
-            chat_time_sessions = 0
-            
-            if conv_ids:
-                fallback_hits = await mongo_db["messages"].count_documents({
-                    "conversation_id": {"$in": conv_ids},
-                    "sender": "bot",
-                    "content": {"$regex": re.escape(fallback_message), "$options": "i"}
-                })
-                total_bot_responses = await mongo_db["messages"].count_documents({
-                    "conversation_id": {"$in": conv_ids},
-                    "sender": "bot"
-                })
                 
-                # Chat duration calculations using message times
-                pipeline = [
-                    {"$match": {"conversation_id": {"$in": conv_ids}}},
-                    {"$group": {
-                        "_id": "$conversation_id",
-                        "min_time": {"$min": "$created_at"},
-                        "max_time": {"$max": "$created_at"}
-                    }}
-                ]
-                dur_cursor = mongo_db["messages"].aggregate(pipeline)
-                async for d_doc in dur_cursor:
-                    min_time = d_doc.get("min_time")
-                    max_time = d_doc.get("max_time")
-                    if min_time and max_time and min_time != max_time:
-                        diff = (max_time - min_time).total_seconds()
-                        if 0 < diff < 7200: # cap session at 2 hours max
-                            total_chat_time += diff
-                            chat_time_sessions += 1
-                                
-            return {
-                "conv_24h": conv_24h,
-                "docs": docs,
-                "total_sessions": total_sessions,
-                "fallback_hits": fallback_hits,
-                "total_bot_responses": total_bot_responses,
-                "total_chat_time": total_chat_time,
-                "chat_time_sessions": chat_time_sessions
-            }
+                # Fetch fallback rate and chat duration metrics
+                fallback_message = config.fallback_message or "I'm sorry, I am unable to assist with that query at the moment."
+                conv_cursor = mongo_db["conversations"].find({"bot_id": str(bot.id)}, {"_id": 1})
+                conv_ids = [c["_id"] async for c in conv_cursor]
+                
+                fallback_hits = 0
+                total_bot_responses = 0
+                total_chat_time = 0
+                chat_time_sessions = 0
+                
+                if conv_ids:
+                    fallback_hits = await mongo_db["messages"].count_documents({
+                        "conversation_id": {"$in": conv_ids},
+                        "sender": "bot",
+                        "content": {"$regex": re.escape(fallback_message), "$options": "i"}
+                    })
+                    total_bot_responses = await mongo_db["messages"].count_documents({
+                        "conversation_id": {"$in": conv_ids},
+                        "sender": "bot"
+                    })
+                    
+                    # Chat duration calculations using message times
+                    pipeline = [
+                        {"$match": {"conversation_id": {"$in": conv_ids}}},
+                        {"$group": {
+                            "_id": "$conversation_id",
+                            "min_time": {"$min": "$created_at"},
+                            "max_time": {"$max": "$created_at"}
+                        }}
+                    ]
+                    dur_cursor = mongo_db["messages"].aggregate(pipeline)
+                    async for d_doc in dur_cursor:
+                        min_time = d_doc.get("min_time")
+                        max_time = d_doc.get("max_time")
+                        if min_time and max_time and min_time != max_time:
+                            diff = (max_time - min_time).total_seconds()
+                            if 0 < diff < 7200: # cap session at 2 hours max
+                                total_chat_time += diff
+                                chat_time_sessions += 1
+                                    
+                return {
+                    "conv_24h": conv_24h,
+                    "docs": docs,
+                    "total_sessions": total_sessions,
+                    "fallback_hits": fallback_hits,
+                    "total_bot_responses": total_bot_responses,
+                    "total_chat_time": total_chat_time,
+                    "chat_time_sessions": chat_time_sessions
+                }
 
-        except Exception as mongo_err:
-            import logging as _log
-            _log.getLogger("app.api.analytics").warning(
-                f"fetch_bot_metrics failed for bot {bot.id}: {mongo_err}"
-            )
-            # Return zeros so one bot failure doesn't crash the whole summary
-            return {
-                "conv_24h": 0, "docs": 0, "total_sessions": 0,
-                "fallback_hits": 0, "total_bot_responses": 0,
-                "total_chat_time": 0, "chat_time_sessions": 0
-            }
+            except Exception as mongo_err:
+                import logging as _log
+                _log.getLogger("app.api.analytics").warning(
+                    f"fetch_bot_metrics failed for bot {bot.id}: {mongo_err}"
+                )
+                # Return zeros so one bot failure doesn't crash the whole summary
+                return {
+                    "conv_24h": 0, "docs": 0, "total_sessions": 0,
+                    "fallback_hits": 0, "total_bot_responses": 0,
+                    "total_chat_time": 0, "chat_time_sessions": 0
+                }
 
         # 3. Trigger queries concurrently across all databases
         tasks = [fetch_bot_metrics(bot, config) for bot, config in bot_configs]
         metrics_results = await asyncio.gather(*tasks)
+
 
         # 4. Sum up all metric responses
         conv_24h_count = sum(m["conv_24h"] for m in metrics_results)

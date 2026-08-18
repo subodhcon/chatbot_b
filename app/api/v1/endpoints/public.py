@@ -150,7 +150,7 @@ async def initialize_public_conversation(
         from app.core.mongo import mongo_registry
         
         mongo_uri = None
-        if config and config.use_custom_mongo:
+        if config and config.use_custom_mongo and config.mongo_uri:
             mongo_uri = config.mongo_uri
             db_name = config.mongo_db_name or mongo_registry.get_database_name(mongo_uri)
         else:
@@ -159,6 +159,7 @@ async def initialize_public_conversation(
             
         if not mongo_uri:
             raise ValueError("No MongoDB URL is configured for this bot.")
+
             
         mongo_client = mongo_registry.get_client(str(bot_id), mongo_uri)
         if not mongo_client:

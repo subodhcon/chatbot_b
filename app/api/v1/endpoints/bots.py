@@ -765,6 +765,12 @@ async def upload_bot_knowledge(
         from app.core.config import settings
         from app.core.mongo import mongo_registry
         mongo_client = mongo_registry.get_client("bots_endpoint", settings.MONGODB_URL)
+        if not mongo_client:
+            return api_error_response(
+                message="Could not connect to knowledge storage (MongoDB). Please verify MONGODB_URL in Railway environment variables.",
+                code="MONGODB_UNAVAILABLE",
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         mongo_db = mongo_client["chatbot"]
         
         source_id = str(uuid.uuid4())
@@ -804,18 +810,16 @@ async def upload_bot_knowledge(
         )
 
         # Trigger background ingestion task
+        # Always try Celery first; fall back to FastAPI BackgroundTasks if unavailable
         from app.tasks.ingestion import ingest_knowledge_source
-        if settings.ENVIRONMENT == "development":
+        try:
+            ingest_knowledge_source.delay(str(db_job.id))
+        except Exception as celery_err:
+            import logging
+            logging.getLogger("app.api.bots").warning(
+                f"Celery unavailable, falling back to BackgroundTasks: {celery_err}"
+            )
             background_tasks.add_task(ingest_knowledge_source.run, str(db_job.id))
-        else:
-            try:
-                ingest_knowledge_source.delay(str(db_job.id))
-            except Exception as celery_err:
-                import logging
-                logging.getLogger("app.api.bots").warning(
-                    f"Failed to queue task in Celery, falling back to FastAPI BackgroundTasks: {celery_err}"
-                )
-                background_tasks.add_task(ingest_knowledge_source.run, str(db_job.id))
 
         # Serialize using Pydantic schemas
         response_data = KnowledgeUploadResponse(
@@ -884,6 +888,12 @@ async def list_bot_knowledge(
         from app.core.config import settings
         from app.core.mongo import mongo_registry
         mongo_client = mongo_registry.get_client("bots_endpoint", settings.MONGODB_URL)
+        if not mongo_client:
+            return api_error_response(
+                message="Could not connect to knowledge storage (MongoDB). Please verify MONGODB_URL in Railway environment variables.",
+                code="MONGODB_UNAVAILABLE",
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         mongo_db = mongo_client["chatbot"]
         
         # Get total count of sources for pagination metadata

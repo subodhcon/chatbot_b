@@ -17,6 +17,7 @@ class KnowledgeSourceResponse(BaseModel):
     file_size: Optional[int] = None
     status: KnowledgeSourceStatus
     created_at: datetime
+    updated_at: Optional[datetime] = None
 
 class IngestionJobResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)

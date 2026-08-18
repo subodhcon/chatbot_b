@@ -154,6 +154,18 @@ async def get_analytics_summary(
                 "chat_time_sessions": chat_time_sessions
             }
 
+        except Exception as mongo_err:
+            import logging as _log
+            _log.getLogger("app.api.analytics").warning(
+                f"fetch_bot_metrics failed for bot {bot.id}: {mongo_err}"
+            )
+            # Return zeros so one bot failure doesn't crash the whole summary
+            return {
+                "conv_24h": 0, "docs": 0, "total_sessions": 0,
+                "fallback_hits": 0, "total_bot_responses": 0,
+                "total_chat_time": 0, "chat_time_sessions": 0
+            }
+
         # 3. Trigger queries concurrently across all databases
         tasks = [fetch_bot_metrics(bot, config) for bot, config in bot_configs]
         metrics_results = await asyncio.gather(*tasks)
@@ -200,6 +212,16 @@ async def get_analytics_summary(
 
 
     except Exception as e:
+        import logging as _log
+        _log.getLogger("app.api.analytics").error("analytics summary failed", exc_info=True)
+        err_str = str(e).lower()
+        if any(kw in err_str for kw in ["serverselectiontimeouterror", "connection refused", "nodename nor servname", "failed to connect"]):
+            return api_error_response(
+                message="Analytics storage (MongoDB) is unreachable. Please ensure MONGODB_URL is configured correctly in the production environment.",
+                code="MONGODB_UNAVAILABLE",
+                details=str(e),
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return api_error_response(
             message="An error occurred while computing analytics summary.",
             code="ANALYTICS_FAILED",

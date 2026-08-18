@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     @property
     def async_database_url(self) -> str:
         url = self.DATABASE_URL
+        # asyncpg does not support sslmode= query param; replace with ssl=require
+        if "sslmode=require" in url:
+            url = url.replace("?sslmode=require", "").replace("&sslmode=require", "")
+            # Add ssl=require in asyncpg-compatible way
+            separator = "&" if "?" in url else "?"
+            url = url + separator + "ssl=require"
         if url.startswith("postgresql://"):
             return url.replace("postgresql://", "postgresql+asyncpg://", 1)
         elif url.startswith("postgres://"):
@@ -40,6 +46,7 @@ class Settings(BaseSettings):
         elif url.startswith("sqlite:///"):
             return url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
         return url
+
 
     # Redis Settings
     REDIS_URL: str = "redis://localhost:6379/0"

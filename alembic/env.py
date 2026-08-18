@@ -11,6 +11,14 @@ sys.path.append(path.dirname(path.dirname(path.abspath(__file__))))
 from app.core.config import settings
 from app.db.base import Base
 
+# Custom compiler rule to render JSONB as JSON in SQLite environments (e.g. SQLite dialect)
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.dialects.postgresql import JSONB
+
+@compiles(JSONB, "sqlite")
+def compile_jsonb_sqlite(type_, compiler, **kw):
+    return "JSON"
+
 # this is the Alembic Config object, which provides access to the values within the .ini file in use.
 config = context.config
 

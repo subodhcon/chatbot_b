@@ -9,7 +9,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-import pgvector
+from pgvector.sqlalchemy import Vector
 
 
 # revision identifiers, used by Alembic.
@@ -37,7 +37,7 @@ def upgrade() -> None:
     op.create_index(op.f('ix_source_chunks_source_id'), 'source_chunks', ['source_id'], unique=False)
     op.create_table('embeddings',
     sa.Column('chunk_id', sa.UUID(), nullable=False, comment='Source chunk associated with this embedding'),
-    sa.Column('embedding_vector', pgvector.sqlalchemy.vector.VECTOR(dim=1536), nullable=False, comment='1536-dimensional embedding vector'),
+    sa.Column('embedding_vector', Vector(dim=1536), nullable=False, comment='1536-dimensional embedding vector'),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False, comment='Timestamp of embedding creation'),
     sa.Column('id', sa.UUID(), nullable=False),
     sa.ForeignKeyConstraint(['chunk_id'], ['source_chunks.id'], ondelete='CASCADE'),

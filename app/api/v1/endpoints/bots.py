@@ -836,6 +836,17 @@ async def upload_bot_knowledge(
             status_code=status.HTTP_404_NOT_FOUND,
         )
     except Exception as e:
+        import logging as _log
+        _log.getLogger("app.api.bots").error("upload_bot_knowledge failed", exc_info=True)
+        # Surface a clear message when MongoDB is unreachable
+        err_str = str(e).lower()
+        if any(kw in err_str for kw in ["serverselectiontimeouterror", "connection refused", "nodename nor servname", "failed to connect"]):
+            return api_error_response(
+                message="Knowledge storage (MongoDB) is unreachable. Please ensure MONGODB_URL is configured correctly in the production environment.",
+                code="MONGODB_UNAVAILABLE",
+                details=str(e),
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return api_error_response(
             message="An error occurred while uploading knowledge source.",
             code="KNOWLEDGE_UPLOAD_FAILED",
@@ -939,6 +950,17 @@ async def list_bot_knowledge(
             status_code=status.HTTP_404_NOT_FOUND,
         )
     except Exception as e:
+        import logging as _log
+        _log.getLogger("app.api.bots").error("list_bot_knowledge failed", exc_info=True)
+        # Surface a clear message when MongoDB is unreachable
+        err_str = str(e).lower()
+        if any(kw in err_str for kw in ["serverselectiontimeouterror", "connection refused", "nodename nor servname", "failed to connect"]):
+            return api_error_response(
+                message="Knowledge storage (MongoDB) is unreachable. Please ensure MONGODB_URL is configured correctly in the production environment.",
+                code="MONGODB_UNAVAILABLE",
+                details=str(e),
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return api_error_response(
             message="An error occurred while listing knowledge sources.",
             code="KNOWLEDGE_LIST_FAILED",

@@ -66,8 +66,14 @@ class OpenAIEmbeddingService:
 
         api_key_to_use = self.api_key
         # Detect if Groq key is used and fallback to Gemini
-        if api_key_to_use.startswith("gsk_"):
+        if api_key_to_use and api_key_to_use.startswith("gsk_"):
             api_key_to_use = GEMINI_FALLBACK_KEY
+            
+        if not api_key_to_use:
+            raise ValueError(
+                "Embedding generation was requested but the active provider key (Groq) does not support embeddings, "
+                "and no fallback GEMINI_API_KEY is configured in Railway environment variables."
+            )
 
         # Check if the key is a Google Gemini API Key
         if api_key_to_use.startswith("AIzaSy") or api_key_to_use.startswith("AQ."):

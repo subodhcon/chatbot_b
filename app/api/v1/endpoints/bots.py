@@ -810,16 +810,14 @@ async def upload_bot_knowledge(
         )
 
         # Trigger background ingestion task
-        # Always try Celery first; fall back to FastAPI BackgroundTasks if unavailable
+        # Force FastAPI BackgroundTasks to process ingestion in-process to avoid Celery queue bottlenecks in Railway
         from app.tasks.ingestion import ingest_knowledge_source
-        try:
-            ingest_knowledge_source.delay(str(db_job.id))
-        except Exception as celery_err:
-            import logging
-            logging.getLogger("app.api.bots").warning(
-                f"Celery unavailable, falling back to BackgroundTasks: {celery_err}"
-            )
-            background_tasks.add_task(ingest_knowledge_source.run, str(db_job.id))
+        import logging
+        logging.getLogger("app.api.bots").info(
+            f"Queueing ingestion job {db_job.id} using FastAPI BackgroundTasks"
+        )
+        background_tasks.add_task(ingest_knowledge_source.run, str(db_job.id))
+
 
         # Serialize using Pydantic schemas
         response_data = KnowledgeUploadResponse(

@@ -3,14 +3,12 @@ from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 import re
-from html import escape
-
 def _clean_and_escape(v: Optional[str]) -> Optional[str]:
     if v is None:
         return v
     # Strip HTML tags
     cleaned = re.sub(r'<[^>]*>', '', v)
-    return escape(cleaned.strip())
+    return cleaned.strip()
 
 
 # ---------------------------------------------------------------------------

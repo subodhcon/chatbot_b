@@ -254,10 +254,10 @@ async def send_public_message(
         from app.core.config import settings
         from app.core.mongo import mongo_registry
         mongo_uri = None
-        if config and config.use_custom_mongo:
+        if config and config.use_custom_mongo and config.mongo_uri:
             mongo_uri = config.mongo_uri
             db_name = config.mongo_db_name or mongo_registry.get_database_name(mongo_uri)
-        elif settings.MONGODB_URL and ("localhost" not in settings.MONGODB_URL or "pytest" in __import__("sys").modules):
+        else:
             mongo_uri = settings.MONGODB_URL
             db_name = mongo_registry.get_database_name(mongo_uri)
             

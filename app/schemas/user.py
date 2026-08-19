@@ -19,8 +19,7 @@ class UserBase(BaseModel):
             return v
         # Remove any HTML tags
         cleaned = re.sub(r'<[^>]*>', '', v)
-        # Escape HTML entities
-        return escape(cleaned.strip())
+        return cleaned.strip()
 
 class UserCreate(UserBase):
 

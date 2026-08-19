@@ -11,10 +11,11 @@ from app.models.knowledge_source import KnowledgeSource, KnowledgeSourceType, Kn
 from app.models.ingestion_job import IngestionJob, IngestionJobStatus
 from app.models.url_crawl import UrlCrawl, UrlCrawlStatus
 from app.models.export_job import ExportJob, ExportJobStatus
+from app.models.bot_manager import BotManager
 from app.models.audit_log import AuditLog
 
 __all__ = [
-    "User", "Bot", "BotVersion", "BotConfig",
+    "User", "Bot", "BotManager", "BotVersion", "BotConfig",
     "Conversation", "Document",
     "WidgetSession", "WidgetSessionStatus",
     "AnalyticsEvent", "AnalyticsEventType",

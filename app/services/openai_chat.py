@@ -14,10 +14,10 @@ class OpenAIChatService(BaseChatService):
     Supports streaming, custom model configuration, and automatic retry handling.
     """
 
-    def __init__(self, api_key: str = settings.OPENAI_API_KEY, default_model: str = "gpt-4o-mini") -> None:
+    def __init__(self, api_key: str = settings.OPENAI_API_KEY, default_model: str = "openai/gpt-oss-120b") -> None:
         self.api_key = api_key
-        if api_key and api_key.startswith("gsk_") and default_model.startswith("gpt-"):
-            self.default_model = "llama-3.1-8b-instant"
+        if api_key and api_key.startswith("gsk_") and (default_model.startswith("gpt-") or "llama" in default_model):
+            self.default_model = "openai/gpt-oss-120b"
         else:
             self.default_model = default_model
         self._client = None
@@ -128,8 +128,8 @@ class OpenAIChatService(BaseChatService):
                     raise ValueError(f"Gemini API error: {resp.status_code} - {resp.text}")
 
         model = model_name or self.default_model
-        if self.api_key.startswith("gsk_") and model.startswith("gpt-"):
-            model = "llama-3.1-8b-instant"
+        if self.api_key.startswith("gsk_") and (model.startswith("gpt-") or "llama" in model):
+            model = "openai/gpt-oss-120b"
         messages = [{"role": "system", "content": system_prompt}]
 
         if chat_history:
@@ -253,8 +253,8 @@ class OpenAIChatService(BaseChatService):
             return
 
         model = model_name or self.default_model
-        if self.api_key.startswith("gsk_") and model.startswith("gpt-"):
-            model = "llama-3.1-8b-instant"
+        if self.api_key.startswith("gsk_") and (model.startswith("gpt-") or "llama" in model):
+            model = "openai/gpt-oss-120b"
         messages = [{"role": "system", "content": system_prompt}]
 
         if chat_history:
